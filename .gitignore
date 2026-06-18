@@ -1,0 +1,12 @@
+# Build outputs — these are produced from source by `make toolchain`, never committed.
+/out/
+toolchain/*/out/
+toolchain/*/work/
+
+# NOTE: the prebuilt WASM artifacts the IDE consumes (IDE/static/clang/*.wasm,
+# IDE/static/nim/*.wasm, *.js, *.data, *.tar) ARE committed so the IDE runs
+# without a local build. They can also be regenerated via `make toolchain && make ide`.
+
+# Nim / native build leftovers
+nimcache/
+*.o

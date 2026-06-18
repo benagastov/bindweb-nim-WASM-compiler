@@ -1,0 +1,95 @@
+name: build-toolchain
+
+# Builds clang.wasm, lld.wasm, memfs.wasm, sysroot.tar, nim.wasm and
+# nim-bundle.js FROM SOURCE on GitHub-hosted runners (which have the RAM/disk
+# this needs), then publishes them as artifacts. Nothing is vendored.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "toolchain/**"
+      - ".github/workflows/build-toolchain.yml"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  memfs:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build memfs.wasm
+        run: |
+          docker build -t nimwasm/memfs \
+            --build-arg WASI_SDK_VERSION=12.0 \
+            -f toolchain/memfs/Dockerfile toolchain
+          mkdir -p out && docker run --rm -v "$PWD/out:/out" nimwasm/memfs
+      - uses: actions/upload-artifact@v4
+        with: { name: memfs, path: out/memfs.wasm }
+
+  # ---------------------------------------------------------------------------
+  clang:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          # LLVM needs the room; strip preinstalled SDKs.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+      - name: Build clang.wasm + lld.wasm + sysroot.tar
+        run: |
+          docker build -t nimwasm/clang \
+            --build-arg WASI_SDK_VERSION=12.0 \
+            -f toolchain/clang-wasm/Dockerfile toolchain
+          mkdir -p out && docker run --rm -v "$PWD/out:/out" nimwasm/clang
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clang
+          path: |
+            out/clang.wasm
+            out/lld.wasm
+            out/sysroot.tar
+
+  # ---------------------------------------------------------------------------
+  nim:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build nim.wasm + nim-bundle.js
+        run: |
+          docker build -t nimwasm/nim \
+            --build-arg EMSDK_VERSION=3.1.69 \
+            -f toolchain/nim-wasm/Dockerfile toolchain
+          mkdir -p out && docker run --rm -v "$PWD/out:/out" nimwasm/nim
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nim
+          path: |
+            out/nim.wasm
+            out/nim-bundle.js
+            out/nimbase.h
+
+  # ---------------------------------------------------------------------------
+  # Assemble a ready-to-serve IDE from the from-source artifacts above.
+  bundle-ide:
+    needs: [memfs, clang, nim]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: clang, path: dl/clang }
+      - uses: actions/download-artifact@v4
+        with: { name: memfs, path: dl/memfs }
+      - uses: actions/download-artifact@v4
+        with: { name: nim,   path: dl/nim }
+      - name: Place artifacts into the IDE tree
+        run: |
+          cp dl/clang/clang.wasm dl/clang/lld.wasm dl/clang/sysroot.tar \
+             dl/memfs/memfs.wasm bindweb-nim-browser/static/clang/
+          cp dl/nim/nim.wasm dl/nim/nim-bundle.js dl/nim/nimbase.h \
+             bindweb-nim-browser/static/nim/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindweb-nim-browser-ide
+          path: bindweb-nim-browser

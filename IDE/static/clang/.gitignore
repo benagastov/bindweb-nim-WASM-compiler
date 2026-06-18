@@ -1,0 +1,4 @@
+# clang.wasm, lld.wasm, memfs.wasm, sysroot.tar are prebuilt WASM artifacts that
+# the IDE consumes. They ARE committed here so the IDE runs without a local build.
+# They can also be regenerated from source:  make toolchain && make ide
+# clang.js (the JS glue) is source.

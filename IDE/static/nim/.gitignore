@@ -1,0 +1,4 @@
+# nim.wasm, nim-bundle.js, nim-bundle.data are prebuilt WASM artifacts that the
+# IDE consumes. They ARE committed here so the IDE runs without a local build.
+# They can also be regenerated from source:  make toolchain && make ide
+# nimbase.h is copied from the Nim source tree by the build.
