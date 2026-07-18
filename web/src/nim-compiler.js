@@ -25,6 +25,34 @@ import { fetchManifest, mountLibpacks } from './libpacks.js';
 const EXPORT_NAME = 'Nim';
 
 /**
+ * Recursively remove a directory tree in an Emscripten FS; missing paths
+ * are ignored. Used to drop the previous compile's user-library mounts
+ * (the legacy singleton module keeps its MEMFS between compiles, so a
+ * library removed from IndexedDB must also vanish from /libs).
+ *
+ * @param {object} FS Emscripten file system object
+ * @param {string} path absolute directory path
+ */
+function rmTree(FS, path) {
+  let names;
+  try {
+    names = FS.readdir(path);
+  } catch (e) {
+    return; // does not exist (or not a directory): nothing to remove
+  }
+  for (const name of names) {
+    if (name === '.' || name === '..') continue;
+    const child = `${path}/${name}`;
+    try {
+      const stat = FS.stat(child);
+      if (FS.isDir(stat.mode)) rmTree(FS, child);
+      else FS.unlink(child);
+    } catch (e) { /* raced or special node: keep going */ }
+  }
+  try { FS.rmdir(path); } catch (e) { /* ignore */ }
+}
+
+/**
  * Canonical Nim flag set (SPEC §5, verified against the legacy IDE
  * index.html STEP 1). The legacy argv was:
  *
@@ -78,7 +106,13 @@ const NIM_FLAGS = [
   '--threads:off',
   '--noLinking:on', '--compileOnly:on',
   '--nimcache:/project/cache',
+  // --path:/nim/lib resolves `import std/...`; bare stdlib imports
+  // (`import streams`) resolve via lib/pure + lib/core. The standard
+  // path="..." lines also live in the nim-config pack's nim.cfg (the
+  // upstream mechanism); the three most common ones are repeated here so
+  // even a bare-bones replacement config pack keeps bare imports working.
   '--path:/bindweb', '--path:/bindweb/nim', '--path:/nim/lib',
+  '--path:/nim/lib/pure', '--path:/nim/lib/core', '--path:/nim/lib/pure/collections',
   '-d:release',
   '-o:main.wasm',
 ];
@@ -226,17 +260,33 @@ export class NimCompiler {
    *     already downloaded while showing progress (e.g. 'nim.wasm',
    *     'nim-bundle.data'); locateFile then serves them from blob: URLs
    *     instead of fetching them a second time.
+   *   userLibs: optional async () => Array<{name, mount, files: Array<{path,
+   *     data}>}> — user-installed libraries (IndexedDB, see libstore.js).
+   *     Called once per compile; the files are mounted under each record's
+   *     `mount` (convention: /libs/<name>) and a `--path:<mount>` flag is
+   *     appended so `import <module>` resolves. Adds/removes therefore take
+   *     effect on the very next Run without reloading the page.
+   *   workspace: optional async () => Array<{path, data}> — the Nim working
+   *     folder (IndexedDB, see vfs.js). Called once per compile; the whole
+   *     tree is mounted at /workspace and a `--path:/workspace` flag is
+   *     added, so multi-file projects (`import sibling`, `import sub/mod`)
+   *     resolve exactly like a local checkout. Pass the entry file to
+   *     compile() via options.outFile = '/workspace/<entry>'.
    */
-  constructor({ vendorUrl, libpacksUrl, onLog = () => {}, preloaded = null }) {
+  constructor({ vendorUrl, libpacksUrl, onLog = () => {}, preloaded = null, userLibs = null, workspace = null }) {
     this.vendorUrl = vendorUrl;
     this.libpacksUrl = libpacksUrl;
     this.onLog = onLog;
     this.preloaded = preloaded;
+    this.userLibs = userLibs;
+    this.workspace = workspace;
     /** @private */ this._glue = null; // {kind:'factory',factory} | {kind:'legacy',module}
     /** @private */ this._manifest = null;
     /** @private */ this._nimbaseHeader = '';
     /** @private */ this._lastModule = null;
     /** @private */ this._blobUrls = new Map();
+    /** @private */ this._userMounts = []; // --path flags for user libs, refreshed per compile
+    /** @private */ this._workspaceMounted = false; // true when /workspace holds a tree
   }
 
   /**
@@ -322,13 +372,19 @@ export class NimCompiler {
       });
     } else {
       module = this._glue.module;
-      // Singleton reuse: drop the previous compile's cache + captures.
-      for (const stale of ['/project/cache', '/project/out.txt', '/project/err.txt']) {
-        try { module.FS.unlink(stale); } catch (e) { /* missing or a dir */ }
-        try {
-          for (const f of module.FS.readdir(stale)) module.FS.unlink(`${stale}/${f}`);
-          module.FS.rmdir(stale);
-        } catch (e) { /* not a dir / missing */ }
+      // Singleton reuse: drop the previous compile's cache + captures so the
+      // nimcache scrape below only ever sees THIS compile. This must be a
+      // RECURSIVE clear: nimcache C file names are mangled relative to the
+      // entry file's directory, so compiling /workspace/main.nim then
+      // /workspace/examples/x.nim yields the SAME modules under DIFFERENT
+      // file names — any stale file left behind makes wasm-ld fail with
+      // "duplicate symbol" (and makes removed libraries linger as ghosts).
+      // (The old readdir+unlink loop never worked: FS.readdir yields '.' as
+      // its first entry, unlink('.') throws, and the catch swallowed it, so
+      // nothing was ever deleted.)
+      rmTree(module.FS, '/project/cache');
+      for (const stale of ['/project/out.txt', '/project/err.txt']) {
+        try { module.FS.unlink(stale); } catch (e) { /* missing */ }
       }
     }
     const FS = module.FS;
@@ -355,6 +411,69 @@ export class NimCompiler {
     }
 
     await mountLibpacks(FS, this._manifest, this.libpacksUrl, (m) => this.onLog(m, 'info'));
+
+    // --- user-installed libraries (IndexedDB) -------------------------------
+    // Re-read on every compile so adds/removes apply to the next Run. The
+    // legacy singleton module keeps its MEMFS between compiles, so the whole
+    // /libs tree is rebuilt from scratch each time (a removed library must
+    // not linger).
+    this._userMounts = [];
+    if (typeof this.userLibs === 'function') {
+      let libs = [];
+      try {
+        libs = (await this.userLibs()) || [];
+      } catch (e) {
+        this.onLog(`user libs: could not read the library store: ${e.message || e}`, 'warn');
+      }
+      rmTree(FS, '/libs');
+      for (const lib of libs) {
+        const mount = typeof lib.mount === 'string' && lib.mount.startsWith('/')
+          ? lib.mount
+          : `/libs/${lib.name}`;
+        let files = 0;
+        for (const f of lib.files || []) {
+          const target = `${mount}/${f.path}`;
+          const slash = target.lastIndexOf('/');
+          if (slash > 0) {
+            try { FS.mkdirTree(target.slice(0, slash)); } catch (e) { /* exists */ }
+          }
+          FS.writeFile(target, f.data);
+          files++;
+        }
+        if (files > 0) {
+          this._userMounts.push(mount);
+          this.onLog(`user libs: mounted "${lib.name}" at ${mount} (${files} files)`, 'info');
+        }
+      }
+    }
+
+    // --- Nim working folder (IndexedDB vfs) ----------------------------------
+    // Same rebuild-every-compile discipline as /libs: the whole tree is
+    // rewritten from the store so file renames/deletes apply immediately,
+    // including on the reused legacy singleton module.
+    this._workspaceMounted = false;
+    if (typeof this.workspace === 'function') {
+      let files = [];
+      try {
+        files = (await this.workspace()) || [];
+      } catch (e) {
+        this.onLog(`workspace: could not read the working folder: ${e.message || e}`, 'warn');
+      }
+      rmTree(FS, '/workspace');
+      if (files.length > 0) {
+        FS.mkdirTree('/workspace');
+        for (const f of files) {
+          const target = `/workspace/${f.path}`;
+          const slash = target.lastIndexOf('/');
+          if (slash > 0) {
+            try { FS.mkdirTree(target.slice(0, slash)); } catch (e) { /* exists */ }
+          }
+          FS.writeFile(target, f.data);
+        }
+        this._workspaceMounted = true;
+        this.onLog(`workspace: mounted ${files.length} file(s) at /workspace`, 'info');
+      }
+    }
     return module;
   }
 
@@ -402,6 +521,12 @@ export class NimCompiler {
     const FS = module.FS;
 
     const outFile = options.outFile || '/project/main.nim';
+    // The entry file may live in a subdirectory of the mounted workspace
+    // tree (e.g. /workspace/src/main.nim) — make sure its folder exists.
+    const outDir = outFile.slice(0, outFile.lastIndexOf('/'));
+    if (outDir) {
+      try { FS.mkdirTree(outDir); } catch (e) { /* exists */ }
+    }
     FS.writeFile(outFile, source);
 
     // -- TTY redirection (ported from legacy IDE index.html, step 1) -----
@@ -410,7 +535,14 @@ export class NimCompiler {
     try { FS.writeFile(stdoutPath, ''); } catch (e) { /* ignore */ }
     try { FS.writeFile(stderrPath, ''); } catch (e) { /* ignore */ }
 
-    const argv = options.flags || [...NIM_FLAGS, outFile];
+    // User-library mounts (IndexedDB) join the stdlib/bindweb --path set.
+    // They come last, so on a name clash the shipped stdlib still wins.
+    const userPaths = this._userMounts.map((m) => `--path:${m}`);
+    // The mounted working folder joins too: sibling imports already resolve
+    // via the importing module's own directory, but this keeps `import x`
+    // working for top-level modules referenced from nested entry files.
+    const workspacePaths = this._workspaceMounted ? ['--path:/workspace'] : [];
+    const argv = options.flags || [...NIM_FLAGS, ...workspacePaths, ...userPaths, outFile];
     let rc = -1;
     let stdoutBuf = '';
     let stderrBuf = '';

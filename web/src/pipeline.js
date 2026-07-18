@@ -14,7 +14,14 @@
  * inlined into the source, and the result is passed to clang as an
  * `extraHeaders` translation unit. The weak raise() stub is a separate TU
  * (raise-stub.c, SPEC §6.2).
+ *
+ * The run step lives in runtime/run-wasm.js (with the WASI shim in
+ * runtime/wasi-shim.js) so the SAME code can be inlined into the static
+ * site produced by the Build button — see site-template.js.
  */
+
+import { createWasiShim, ProcExit } from './runtime/wasi-shim.js';
+import { runWasmApp } from './runtime/run-wasm.js';
 
 /**
  * C prologue prepended to every Nim-generated TU.
@@ -138,138 +145,33 @@ export function buildBindwebRuntimeTU(runtimeC, runtimeH) {
 }
 
 /* --------------------------------------------------------------------------
- * WASI (preview1) host shim.
- *
- * Ported from the legacy IDE step 3: app.wasm is linked with crt1.o +
- * wasi-libc, so besides the bindweb "env" imports it imports WASI
- * syscalls from "wasi_unstable"/"wasi_snapshot_preview1". The bindweb
- * runtime only provides "env", so this shim covers the rest. Its memory
- * is wired after instantiation (exports.memory).
- * ------------------------------------------------------------------------ */
-
-const WASI_ESUCCESS = 0;
-const WASI_EBADF = 8;
-
-/** Thrown by the shim's proc_exit; exit(0) is normal completion. */
-class ProcExit extends Error {
-  constructor(code) {
-    super(`exit ${code}`);
-    this.code = code;
-  }
-}
-
-/**
- * Create the WASI shim.
- *
- * @param {(msg: string, kind?: string) => void} onLog log sink;
- *   fd_write to fd 1 logs as 'stdout', fd 2 as 'stderr'
- * @returns {{impl: object, setMemory: (mem: WebAssembly.Memory) => void}}
- */
-function createWasiShim(onLog) {
-  let memory = null;
-  const u8 = () => new Uint8Array(memory.buffer);
-  const dv = () => new DataView(memory.buffer);
-  const textDecoder = new TextDecoder();
-
-  function writeIovs(fd, iovsPtr, iovsLen, nwrittenPtr) {
-    const view = dv();
-    let total = 0;
-    for (let i = 0; i < iovsLen; i++) {
-      const p = iovsPtr + i * 8;
-      const buf = view.getUint32(p, true);
-      const len = view.getUint32(p + 4, true);
-      if (len > 0) {
-        const txt = textDecoder.decode(u8().slice(buf, buf + len));
-        onLog(txt.replace(/\n$/, ''), fd === 2 ? 'stderr' : 'stdout');
-        total += len;
-      }
-    }
-    view.setUint32(nwrittenPtr, total, true);
-    return WASI_ESUCCESS;
-  }
-
-  const impl = {
-    proc_exit(code) { throw new ProcExit(code); },
-    fd_write(fd, p, n, w) { return writeIovs(fd, p, n, w); },
-    fd_read(_fd, _i, _n, nreadPtr) { dv().setUint32(nreadPtr, 0, true); return WASI_ESUCCESS; },
-    fd_close() { return WASI_ESUCCESS; },
-    fd_seek(_fd, _lo, _hi, _w, newOffPtr) {
-      if (typeof newOffPtr === 'number') {
-        dv().setUint32(newOffPtr, 0, true);
-        dv().setUint32(newOffPtr + 4, 0, true);
-      }
-      return WASI_ESUCCESS;
-    },
-    fd_fdstat_get(_fd, buf) {
-      const v = dv();
-      v.setUint8(buf, 2);
-      v.setUint16(buf + 2, 0, true);
-      v.setBigUint64(buf + 8, 0xffffffffffffffffn, true);
-      v.setBigUint64(buf + 16, 0xffffffffffffffffn, true);
-      return WASI_ESUCCESS;
-    },
-    fd_prestat_get() { return WASI_EBADF; },
-    fd_prestat_dir_name() { return WASI_EBADF; },
-    args_sizes_get(a, b) { const v = dv(); v.setUint32(a, 0, true); v.setUint32(b, 0, true); return WASI_ESUCCESS; },
-    args_get() { return WASI_ESUCCESS; },
-    environ_sizes_get(a, b) { const v = dv(); v.setUint32(a, 0, true); v.setUint32(b, 0, true); return WASI_ESUCCESS; },
-    environ_get() { return WASI_ESUCCESS; },
-    clock_time_get(_id, _p, t) { dv().setBigUint64(t, BigInt(Date.now()) * 1000000n, true); return WASI_ESUCCESS; },
-    clock_res_get(_id, r) { dv().setBigUint64(r, 1000000n, true); return WASI_ESUCCESS; },
-    random_get(buf, len) {
-      const b = u8().subarray(buf, buf + len);
-      if (globalThis.crypto && crypto.getRandomValues) {
-        for (let o = 0; o < len; o += 65536) {
-          crypto.getRandomValues(b.subarray(o, Math.min(o + 65536, len)));
-        }
-      } else {
-        for (let i = 0; i < len; i++) b[i] = (Math.random() * 256) | 0;
-      }
-      return WASI_ESUCCESS;
-    },
-    poll_oneoff(_i, _o, _n, neventsPtr) { dv().setUint32(neventsPtr, 0, true); return WASI_ESUCCESS; },
-    sched_yield() { return WASI_ESUCCESS; },
-  };
-
-  return { impl, setMemory(mem) { memory = mem; } };
-}
-
-/* --------------------------------------------------------------------------
  * Public pipeline.
  * ------------------------------------------------------------------------ */
 
 /**
- * Compile Nim source and run the resulting wasm app.
+ * Compile Nim source to a linked app.wasm (steps 1–3 of the pipeline).
+ *
+ * This is the shared core of both the Run button (compileAndRun below,
+ * which additionally instantiates the wasm in the page) and the Build
+ * button (main.js, which stores the wasm into the deployed-site folder).
  *
  * @param {object} args
- * @param {string} args.source Nim source code
+ * @param {string} args.source Nim source code of the entry file
+ * @param {string} [args.outFile] MEMFS path of the entry file
+ *   (default: /project/main.nim; multi-file projects pass
+ *   /workspace/<entry> — see nim-compiler.js `workspace` option)
  * @param {import('./nim-compiler.js').NimCompiler} args.nim initialized NimCompiler
  * @param {import('./clang-compiler.js').ClangCompiler} args.clang initialized ClangCompiler
- * @param {{createBindwebRunner: (el: HTMLElement) => object}} args.runtime
- *   the bindweb browser runtime (web/src/runtime/bindweb-browser-runtime.js)
- * @param {HTMLElement} [args.outputEl] DOM container the app renders into
- *   (extension of the SPEC §4 signature: the runner needs a mount point;
- *   defaults to document.body)
- * @param {(msg: string, kind?: string) => void} [args.onLog] log sink;
- *   kind is one of 'step' | 'info' | 'ok' | 'warn' | 'error' | 'stdout' | 'stderr'
- * @returns {Promise<{ok: boolean, stage: string, nimStdout: string,
- *   nimStderr: string, clangLog: string, error?: string}>}
+ * @param {(msg: string, kind?: string) => void} [args.onLog] log sink
+ * @returns {Promise<{ok: boolean, stage: string, wasm: Uint8Array|null,
+ *   nimStdout: string, nimStderr: string, clangLog: string, error?: string}>}
  */
-export async function compileAndRun({ source, nim, clang, runtime, outputEl, onLog = () => {} }) {
-  const result = { ok: false, stage: 'nim', nimStdout: '', nimStderr: '', clangLog: '' };
-  if (!outputEl) {
-    if (typeof document === 'undefined' || !document.body) {
-      throw new Error('pipeline: outputEl is required outside a DOM (bindweb app mount point)');
-    }
-    outputEl = document.body;
-  }
-  if (!runtime || typeof runtime.createBindwebRunner !== 'function') {
-    throw new Error('pipeline: runtime must provide createBindwebRunner(el)');
-  }
+export async function compileToWasm({ source, outFile, nim, clang, onLog = () => {} }) {
+  const result = { ok: false, stage: 'nim', wasm: null, nimStdout: '', nimStderr: '', clangLog: '' };
 
   // -- Step 1: Nim -> C --------------------------------------------------
   onLog('=== step 1: Nim -> C (nim.wasm) ===', 'step');
-  const nimResult = await nim.compile(source);
+  const nimResult = await nim.compile(source, outFile ? { outFile } : undefined);
   result.nimStdout = nimResult.stdout;
   result.nimStderr = nimResult.stderr;
   if (nimResult.stdout.trim()) {
@@ -327,89 +229,55 @@ export async function compileAndRun({ source, nim, clang, runtime, outputEl, onL
   }
   onLog(`clang: linked app.wasm (${link.wasm.length} bytes)`, 'ok');
 
+  result.ok = true;
+  result.wasm = link.wasm;
+  return result;
+}
+
+/**
+ * Compile Nim source and run the resulting wasm app.
+ *
+ * @param {object} args
+ * @param {string} args.source Nim source code
+ * @param {string} [args.outFile] MEMFS path of the entry file
+ * @param {import('./nim-compiler.js').NimCompiler} args.nim initialized NimCompiler
+ * @param {import('./clang-compiler.js').ClangCompiler} args.clang initialized ClangCompiler
+ * @param {{createBindwebRunner: (el: HTMLElement) => object}} args.runtime
+ *   the bindweb browser runtime (web/src/runtime/bindweb-browser-runtime.js)
+ * @param {HTMLElement} [args.outputEl] DOM container the app renders into
+ *   (extension of the SPEC §4 signature: the runner needs a mount point;
+ *   defaults to document.body)
+ * @param {(msg: string, kind?: string) => void} [args.onLog] log sink;
+ *   kind is one of 'step' | 'info' | 'ok' | 'warn' | 'error' | 'stdout' | 'stderr'
+ * @returns {Promise<{ok: boolean, stage: string, nimStdout: string,
+ *   nimStderr: string, clangLog: string, error?: string}>}
+ */
+export async function compileAndRun({ source, outFile, nim, clang, runtime, outputEl, onLog = () => {} }) {
+  if (!outputEl) {
+    if (typeof document === 'undefined' || !document.body) {
+      throw new Error('pipeline: outputEl is required outside a DOM (bindweb app mount point)');
+    }
+    outputEl = document.body;
+  }
+  if (!runtime || typeof runtime.createBindwebRunner !== 'function') {
+    throw new Error('pipeline: runtime must provide createBindwebRunner(el)');
+  }
+
+  const result = await compileToWasm({ source, outFile, nim, clang, onLog });
+  if (!result.ok) return result;
+
   // -- Step 4: instantiate + run (ported from legacy IDE step 3) ---------
   onLog('=== step 4: run with bindweb runtime ===', 'step');
   result.stage = 'run';
-  try {
-    const wasmModule = await WebAssembly.compile(link.wasm);
-    const runner = runtime.createBindwebRunner(outputEl);
-    const wasi = createWasiShim(onLog);
-
-    // Build the import object by reflecting over what the module actually
-    // needs: "env" -> bindweb runtime, "wasi_*" -> shim, anything else ->
-    // safe no-op (ported from legacy IDE step 3).
-    const envImports = (runner.imports && runner.imports.env) || {};
-    const importObject = {};
-    for (const desc of WebAssembly.Module.imports(wasmModule)) {
-      const mod = desc.module;
-      const name = desc.name;
-      importObject[mod] = importObject[mod] || {};
-      if (desc.kind !== 'function') continue;
-      if (mod === 'env' && typeof envImports[name] === 'function') {
-        importObject[mod][name] = envImports[name];
-      } else if (typeof wasi.impl[name] === 'function') {
-        importObject[mod][name] = wasi.impl[name];
-      } else {
-        importObject[mod][name] = () => 0;
-      }
-    }
-
-    const instance = await WebAssembly.instantiate(wasmModule, importObject);
-    onLog('run: wasm instance created', 'ok');
-
-    // Wire memory into the WASI shim, then connect the bindweb runtime.
-    wasi.setMemory(instance.exports.memory);
-    runner.connect(instance);
-
-    // Clear the output container before running.
-    outputEl.innerHTML = '';
-
-    // wasi-libc's _start calls exit() when main returns, which the shim
-    // raises as ProcExit; treat exit(0) as normal completion.
-    let ranOk = false;
-    try {
-      if (instance.exports._start) {
-        instance.exports._start();
-        onLog('run: _start() executed', 'ok');
-        ranOk = true;
-      } else if (instance.exports.main) {
-        instance.exports.main();
-        onLog('run: main() executed', 'ok');
-        ranOk = true;
-      } else {
-        onLog('run: no _start or main export found', 'warn');
-      }
-    } catch (e) {
-      if (e instanceof ProcExit) {
-        onLog(`run: program exited with code ${e.code}`, e.code === 0 ? 'ok' : 'warn');
-        ranOk = e.code === 0;
-      } else {
-        throw e;
-      }
-    }
-
-    // Drain the trailing command batch: bindweb only auto-flushes the
-    // command buffer on the next return-value DOM call, so void commands
-    // queued after the last create/get are still pending when main()
-    // returns (ported from legacy IDE step 3).
-    if (instance.exports.bindweb_flush) {
-      try {
-        instance.exports.bindweb_flush();
-        onLog('run: flushed trailing commands', 'ok');
-      } catch (e) {
-        onLog(`run: trailing flush failed: ${e.message || e}`, 'stderr');
-      }
-    }
-
-    // Start the event loop if set_main_loop was called.
-    runner.startEventLoop();
-
-    result.ok = ranOk;
-    if (!ranOk) result.error = 'app ran but reported a failure';
-  } catch (e) {
-    result.error = `run failed: ${e.message || e}`;
-    onLog(result.error, 'error');
-    if (e.stack) onLog(String(e.stack).split('\n').slice(0, 4).join('\n'), 'stderr');
-  }
+  const ran = await runWasmApp({
+    wasmBytes: result.wasm,
+    outputEl,
+    onLog,
+    createBindwebRunner: runtime.createBindwebRunner,
+    createWasiShim,
+    ProcExit,
+  });
+  result.ok = ran.ok;
+  if (!ran.ok) result.error = ran.error;
   return result;
 }

@@ -248,7 +248,7 @@
   }
 
   #app-output:empty::before {
-    content: "Your app will appear here after you press Run.";
+    content: "Your app will appear here after you press Run or Build.";
     color: var(--text-faint);
     font-size: 13px;
     margin: auto;
@@ -310,6 +310,426 @@
   #console .warn { color: var(--warn); }
   #console .error, #console .stderr { color: var(--err); }
   #console .stdout { color: var(--text); }
+
+  /* ---- left-pane sub-tabs: Code | Libraries ---- */
+  .tab-bar {
+    display: flex;
+    gap: 4px;
+    padding: 6px 10px;
+  }
+
+  .tab {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 5px 12px;
+    cursor: pointer;
+  }
+  .tab:hover:not(.active) { color: var(--text); }
+  .tab.active {
+    background: var(--bg-inset);
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  #lib-count {
+    display: inline-block;
+    min-width: 16px;
+    padding: 0 4px;
+    margin-left: 4px;
+    border-radius: 999px;
+    background: var(--accent-dim);
+    color: var(--text);
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+  }
+  #lib-count:empty { display: none; }
+
+  /* ---- Libraries panel ---- */
+  #libs-view {
+    flex: 1;
+    overflow: auto;
+    min-height: 0;
+    padding: 16px 20px;
+    background: var(--bg-inset);
+  }
+
+  .lib-section { margin-bottom: 20px; }
+
+  .lib-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .lib-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  #lib-url {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 8px 10px;
+    outline: none;
+  }
+  #lib-url:focus { border-color: var(--accent-dim); }
+
+  .lib-btn {
+    background: var(--accent-dim);
+    color: var(--text);
+    border: 1px solid var(--accent-dim);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 16px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .lib-btn:hover:not(:disabled) { background: var(--accent); color: #10131a; }
+  .lib-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .lib-btn.secondary {
+    background: var(--bg-raised);
+    border-color: var(--border);
+  }
+  .lib-btn.secondary:hover:not(:disabled) { background: var(--border); color: var(--text); }
+
+  #lib-upload-name {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #lib-status {
+    display: none;
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    margin-bottom: 4px;
+  }
+  #lib-status.visible { display: block; }
+  #lib-status.busy { color: var(--accent); border-color: var(--accent-dim); }
+  #lib-status.ok { color: var(--ok); }
+  #lib-status.err { color: var(--err); border-color: var(--err); }
+
+  .lib-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .lib-item-main { flex: 1; min-width: 0; }
+
+  .lib-item-name {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+
+  .lib-mount {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--accent);
+    margin-left: 8px;
+  }
+
+  .lib-item-meta, .lib-item-requires {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lib-item-requires { color: var(--warn); }
+  .lib-item-meta a { color: var(--text-dim); }
+
+  .lib-remove {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--err);
+    font-size: 11.5px;
+    padding: 6px 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .lib-remove:hover { border-color: var(--err); }
+
+  #lib-empty {
+    font-size: 12px;
+    color: var(--text-faint);
+    padding: 14px 12px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    text-align: center;
+  }
+
+  .lib-footnote {
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-faint);
+  }
+  .lib-footnote code {
+    font-family: var(--mono);
+    color: var(--text-dim);
+  }
+
+  /* ---- dependency install dialog ---- */
+  #dep-modal { display: none; }
+  #dep-modal.visible {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .dep-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .dep-dialog {
+    position: relative;
+    width: min(540px, calc(100vw - 48px));
+    max-height: min(500px, calc(100vh - 64px));
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .dep-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .dep-sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+
+  #dep-list {
+    overflow: auto;
+    min-height: 0;
+    margin-bottom: 14px;
+  }
+
+  .dep-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 6px;
+    background: var(--bg-inset);
+  }
+
+  .dep-row-name {
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dep-row-name .dep-via {
+    font-weight: 400;
+    color: var(--text-faint);
+    font-size: 11px;
+  }
+
+  .dep-row-status {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .dep-row-status.busy { color: var(--accent); }
+  .dep-row-status.ok { color: var(--ok); }
+  .dep-row-status.warn { color: var(--warn); }
+  .dep-row-status.err { color: var(--err); }
+
+  .dep-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  /* ---- Build button (secondary, next to Run) ---- */
+  #btn-build {
+    padding: 11px 22px;
+    background: var(--bg-inset);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  #btn-build:hover:not(:disabled) { background: var(--accent-dim); border-color: var(--accent-dim); }
+  #btn-build:disabled { color: var(--text-faint); cursor: not-allowed; }
+
+  /* ---- virtual-folder panels (Project / Site) ---- */
+  .vfs-view {
+    flex: 1;
+    overflow: auto;
+    min-height: 0;
+    padding: 12px 14px;
+    background: var(--bg-inset);
+  }
+
+  .vfs-toolbar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+
+  .vfs-toolbar .lib-btn { padding: 6px 12px; font-size: 11.5px; }
+
+  #ws-status, #site-status {
+    display: none;
+    font-size: 12px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    margin-bottom: 8px;
+  }
+  #ws-status.visible, #site-status.visible { display: block; }
+  #ws-status.err, #site-status.err { color: var(--err); border-color: var(--err); }
+  #ws-status.ok, #site-status.ok { color: var(--ok); }
+
+  .vfs-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .vfs-row:hover { background: var(--bg-raised); }
+  .vfs-row.open { background: var(--accent-dim); }
+  .vfs-row .vfs-icon {
+    width: 16px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .vfs-row .vfs-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .vfs-row.is-dir .vfs-name { font-weight: 600; }
+  .vfs-row .vfs-meta {
+    font-size: 11px;
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .vfs-row .vfs-entry-badge {
+    font-size: 10px;
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    border-radius: 999px;
+    padding: 1px 7px;
+    flex-shrink: 0;
+  }
+  .vfs-row .row-actions {
+    display: none;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .vfs-row:hover .row-actions { display: flex; }
+  .row-actions button {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-dim);
+    font-size: 10.5px;
+    padding: 2px 7px;
+    cursor: pointer;
+  }
+  .row-actions button:hover { color: var(--text); border-color: var(--text-dim); }
+  .row-actions button.danger:hover { color: var(--err); border-color: var(--err); }
+
+  .vfs-inline-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--accent-dim);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 3px 7px;
+    outline: none;
+  }
+
+  .vfs-empty {
+    font-size: 12px;
+    color: var(--text-faint);
+    padding: 14px 12px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    text-align: center;
+  }
+
+  /* The app pane in "deployed site" mode: the iframe fills the pane. */
+  #app-output.site-mode {
+    display: block;
+    padding: 0;
+  }
+  #app-output.site-mode iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #f2f3f4;
+  }
 </style>
 </head>
 <body>
@@ -322,7 +742,8 @@
     </select>
     <span class="spacer"></span>
     <span id="status">Getting ready…</span>
-    <button id="btn-run" disabled>Run</button>
+    <button id="btn-build" disabled title="Compile the project (entry: main.nim) into the deployed site folder">Build</button>
+    <button id="btn-run" disabled title="Compile and run the file open in the editor">Run</button>
   </header>
 
   <div id="progress-wrap">
@@ -332,10 +753,93 @@
 
   <main>
     <section class="pane" id="editor-pane">
-      <div class="pane-label">Your Nim code</div>
-      <div class="editor-wrap">
+      <div class="pane-label tab-bar">
+        <button class="tab active" id="tab-code" type="button">main.nim</button>
+        <button class="tab" id="tab-project" type="button">Project</button>
+        <button class="tab" id="tab-site" type="button">Site</button>
+        <button class="tab" id="tab-libs" type="button">Libraries <span id="lib-count"></span></button>
+      </div>
+      <div class="editor-wrap" id="code-view">
         <div id="line-numbers">1</div>
         <textarea id="editor" spellcheck="false" wrap="off"></textarea>
+      </div>
+
+      <!-- Project sub-tab: the Nim working folder (a virtual file system in
+           IndexedDB). The whole tree is mounted at /workspace on every
+           compile, so multi-file projects just work. -->
+      <div class="vfs-view" id="project-view" hidden>
+        <div class="vfs-toolbar">
+          <button class="lib-btn" id="ws-new-file" type="button">New file</button>
+          <button class="lib-btn" id="ws-new-folder" type="button">New folder</button>
+          <button class="lib-btn secondary" id="ws-upload-btn" type="button">Upload…</button>
+          <input type="file" id="ws-upload" multiple hidden>
+        </div>
+        <div id="ws-status"></div>
+        <div id="ws-tree"></div>
+        <p class="lib-footnote">
+          This is your Nim codebase — like a VS Code working folder, stored in
+          your browser (IndexedDB). Click a file to edit it. The whole folder is
+          mounted at <code>/workspace</code> on every compile, so
+          <code>import sibling</code> and <code>import sub/mod</code> work.
+          <strong>Run</strong> compiles the file open in the editor;
+          <strong>Build</strong> compiles <code>main.nim</code> into the Site folder.
+        </p>
+      </div>
+
+      <!-- Site sub-tab: the deployed static webpage folder. Build writes
+           index.html + app.wasm + the runtime here; the app pane renders
+           this folder's index.html. -->
+      <div class="vfs-view" id="site-view" hidden>
+        <div class="vfs-toolbar">
+          <button class="lib-btn" id="site-open-tab" type="button">Open site in new tab</button>
+          <button class="lib-btn secondary" id="site-refresh" type="button">Show in app pane</button>
+          <button class="lib-btn secondary" id="site-upload-btn" type="button">Upload…</button>
+          <input type="file" id="site-upload" multiple hidden>
+          <button class="lib-btn secondary" id="site-clear" type="button">Clear…</button>
+        </div>
+        <div id="site-status"></div>
+        <div id="site-tree"></div>
+        <p class="lib-footnote">
+          This is the deployed static website — the working folder of the app
+          pane, which renders this folder's <code>index.html</code>. Press
+          <strong>Build</strong> to compile your project into it
+          (<code>app.wasm</code> + <code>index.html</code> + the runtime).
+          You can add your own files (CSS, images, …) — Build only overwrites
+          <code>app.wasm</code>, <code>nim-runtime/*</code> and a generated
+          <code>index.html</code>.
+        </p>
+      </div>
+
+      <!-- Libraries sub-tab: user-installed Nim libraries, kept in IndexedDB
+           and mounted at /libs/<name> before every compile. -->
+      <div id="libs-view" hidden>
+        <div class="lib-section">
+          <div class="lib-section-title">Add from a GitHub link</div>
+          <div class="lib-row">
+            <input type="text" id="lib-url" spellcheck="false"
+                   placeholder="https://github.com/PMunch/protobuf-nim">
+            <button class="lib-btn" id="lib-add" type="button">Add</button>
+          </div>
+          <div class="lib-section-title">…or upload a .zip of the library</div>
+          <div class="lib-row">
+            <button class="lib-btn secondary" id="lib-upload-btn" type="button">Choose .zip file…</button>
+            <input type="file" id="lib-upload" accept=".zip,application/zip" hidden>
+            <span id="lib-upload-name"></span>
+          </div>
+          <div id="lib-status"></div>
+        </div>
+
+        <div class="lib-section">
+          <div class="lib-section-title">Installed libraries</div>
+          <div id="lib-list"></div>
+        </div>
+
+        <p class="lib-footnote">
+          Libraries are stored in your browser (IndexedDB) and mounted at
+          <code>/libs/&lt;name&gt;</code> before every compile — adding or
+          removing one takes effect on the next Run, no reload needed. After
+          adding protobuf-nim, for example, <code>import protobuf</code> just works.
+        </p>
       </div>
     </section>
 
@@ -357,6 +861,22 @@
       </div>
     </section>
   </main>
+
+  <!-- Dependency dialog: shown after adding a library whose .nimble lists
+       requirements; resolves names via the nimble registry and installs
+       them (recursively) on confirmation. -->
+  <div id="dep-modal" aria-hidden="true">
+    <div class="dep-backdrop"></div>
+    <div class="dep-dialog" role="dialog" aria-modal="true" aria-labelledby="dep-title">
+      <div class="dep-title" id="dep-title">Install dependencies?</div>
+      <div class="dep-sub" id="dep-sub"></div>
+      <div id="dep-list"></div>
+      <div class="dep-actions">
+        <button class="lib-btn" id="dep-install" type="button">Install all</button>
+        <button class="lib-btn secondary" id="dep-skip" type="button">Skip</button>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="./src/main.js"></script>
 </body>

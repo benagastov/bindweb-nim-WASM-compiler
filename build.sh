@@ -4,6 +4,7 @@
 #
 # WHAT: Orchestrates the whole toolchain:
 #         clang      fetch + verify + patch binji's prebuilt clang toolchain
+#         nim-fetch  download the prebuilt nim.wasm toolchain (SHA-256 pinned)
 #         nim        build nim.wasm natively (requires a local emsdk)
 #         nim-docker build nim.wasm in Docker (no local emsdk needed)
 #         libs       (re)pack libpacks from libpacks/src/* via tools/pack-lib.sh
@@ -53,6 +54,15 @@ cmd_nim() {
   [[ -n "${EMSDK_DIR:-}" && -f "$EMSDK_DIR/emsdk_env.sh" ]] \
     || die "emsdk still unavailable after setup (see messages above), or use: ./build.sh nim-docker"
   bash toolchain/nim/build.sh
+}
+
+cmd_nim_fetch() {
+  say "nim-fetch: downloading prebuilt nim.wasm toolchain into $VENDOR_NIM_DIR"
+  if ! command -v curl >/dev/null 2>&1; then
+    say "nim-fetch: curl not found — cannot download (falling back to source build)"
+    return 1
+  fi
+  bash toolchain/fetch-nim.sh
 }
 
 cmd_nim_docker() {
@@ -119,7 +129,13 @@ cmd_clean() {
 
 cmd_all() {
   cmd_clang
-  cmd_nim
+  # Fast path: fetch the pinned prebuilt nim.wasm; fall back to a source
+  # build only if the download is unavailable (offline, mirror down).
+  if [[ -f "$VENDOR_NIM_DIR/nim.wasm" ]]; then
+    say "all: nim.wasm already present — skipping nim toolchain step"
+  else
+    cmd_nim_fetch || cmd_nim
+  fi
   cmd_libs
   cmd_dist
   say "all: build complete — run './build.sh serve' and open http://localhost:8080"
@@ -133,6 +149,7 @@ targets (run in the order given):
   all         clang + nim + libs + dist (default)
   setup       prepare a bare machine: base deps + pinned emsdk (native path)
   clang       fetch + verify the prebuilt clang toolchain (--force re-downloads)
+  nim-fetch   download the prebuilt nim.wasm toolchain (SHA-256 pinned, fast)
   nim         build nim.wasm natively (requires emsdk; EMSDK_DIR must be set)
   nim-docker  build nim.wasm in Docker (no local emsdk needed)
   libs        (re)pack libpacks from libpacks/src/*
@@ -162,6 +179,7 @@ main() {
       all)        cmd_all ;;
       setup|env)  cmd_setup ;;
       clang)      cmd_clang $force ;;
+      nim-fetch)  cmd_nim_fetch ;;
       nim)        cmd_nim ;;
       nim-docker) cmd_nim_docker ;;
       libs)       cmd_libs ;;

@@ -21,8 +21,19 @@
 
 import { NimCompiler } from './nim-compiler.js';
 import { ClangCompiler } from './clang-compiler.js';
-import { compileAndRun } from './pipeline.js';
+import { compileAndRun, compileToWasm } from './pipeline.js';
 import { createBindwebRunner } from './runtime/bindweb-browser-runtime.js';
+import { listLibs, getLibsWithFiles, deleteLib, slugify } from './libstore.js';
+import { importFromGitHub, importFromZipFile, fetchRegistry, normalizeGitUrl, parseGitHubUrl } from './libimport.js';
+import {
+  AREA_WORKSPACE, AREA_SITE,
+  listFiles, readFile, writeFile, makeDir, deletePath, renamePath, clearArea,
+  getFilesWithData, baseName, isLikelyBinary,
+} from './vfs.js';
+import {
+  SITE_GENERATED_MARKER, RUNTIME_SITE_FILES, SITE_BOOT_JS,
+  stripEsmExports, rewriteSiteUrls, mimeFor, generateSiteIndex,
+} from './site-template.js';
 
 /**
  * Dist-layout config: index.html sits at the dist root next to vendor/
@@ -285,10 +296,30 @@ proc main() =
 main()
 `;
 
+const EXAMPLE_HASH = `## Hashing -- uses the nim-lang/checksums library added in the Libraries tab.
+## Open the Libraries tab, add https://github.com/nim-lang/checksums,
+## then press Run. (Until you do, this fails with "cannot open file: checksums/sha2".)
+
+import checksums/sha2, checksums/md5
+
+proc main() =
+  let text = "Hello from Nim in the browser!"
+  echo "input:   ", text
+  echo "SHA-256: ", $Sha_256.secureHash(text)
+  echo "SHA-512: ", $Sha_512.secureHash(text)
+  echo "MD5:     ", getMD5(text)
+
+main()
+`;
+
 const EXAMPLES = [
   { id: 'buttons', label: 'Buttons (JS + WebApp)', source: EXAMPLE_BUTTONS },
   { id: 'rotate', label: 'Rotating Canvas', source: EXAMPLE_ROTATE },
   { id: 'mouse', label: 'Mouse Interaction', source: EXAMPLE_MOUSE },
+  {
+    id: 'hash', label: 'Hashing (Libraries tab demo)', source: EXAMPLE_HASH,
+    libId: 'checksums', libUrl: 'https://github.com/nim-lang/checksums',
+  },
 ];
 
 /* --------------------------------------------------------------------------
@@ -301,6 +332,7 @@ const consoleEl = document.getElementById('console');
 const outputEl = document.getElementById('app-output');
 const statusEl = document.getElementById('status');
 const runBtn = document.getElementById('btn-run');
+const buildBtn = document.getElementById('btn-build');
 const examplesEl = document.getElementById('examples');
 const progressWrap = document.getElementById('progress-wrap');
 const progressBar = document.getElementById('progress-bar');
@@ -361,6 +393,8 @@ function updateLineNumbers() {
 }
 
 editor.addEventListener('input', updateLineNumbers);
+// Auto-save the open file into the workspace store (debounced).
+editor.addEventListener('input', scheduleSave);
 editor.addEventListener('scroll', () => {
   lineNumbers.scrollTop = editor.scrollTop;
 });
@@ -385,14 +419,1063 @@ for (const ex of EXAMPLES) {
 }
 examplesEl.disabled = false;
 
-examplesEl.addEventListener('change', () => {
+examplesEl.addEventListener('change', async () => {
   const ex = EXAMPLES.find((e) => e.id === examplesEl.value);
   if (!ex) return;
-  editor.value = ex.source;
+  // Examples become real files in the working folder (examples/<id>.nim),
+  // so they can be edited, built and kept like any other project file.
+  const path = `examples/${ex.id}.nim`;
+  try {
+    await writeFile(AREA_WORKSPACE, path, ex.source);
+    await openFile(path);
+    log(`loaded example "${ex.label}" into ${path} — press Run to try it`, 'info');
+  } catch (e) {
+    // Store unavailable: fall back to session-only editing.
+    editor.value = ex.source;
+    updateLineNumbers();
+    log(`loaded example "${ex.label}" (file store unavailable — not saved)`, 'warn');
+  }
+  hideError();
+  // Examples that need a user library: jump to the Libraries tab only when
+  // the library is not installed yet.
+  if (ex.libId) {
+    try {
+      const libs = await listLibs();
+      if (!libs.some((l) => l.id === ex.libId)) {
+        log(`this example needs ${ex.libId} — add it in the Libraries tab (link is pre-filled)`, 'warn');
+        if (ex.libUrl) libUrlEl.value = ex.libUrl;
+        showTab('libs');
+      }
+    } catch (e) { /* store unavailable: the compile error will say what to do */ }
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * Libraries sub-tab: install Nim libraries from a GitHub link or a .zip
+ * upload into IndexedDB; they mount at /libs/<name> on the next Run.
+ * ------------------------------------------------------------------------ */
+
+const tabCode = document.getElementById('tab-code');
+const tabProject = document.getElementById('tab-project');
+const tabSite = document.getElementById('tab-site');
+const tabLibs = document.getElementById('tab-libs');
+const codeView = document.getElementById('code-view');
+const projectView = document.getElementById('project-view');
+const siteView = document.getElementById('site-view');
+const libsView = document.getElementById('libs-view');
+const libCountEl = document.getElementById('lib-count');
+const libUrlEl = document.getElementById('lib-url');
+const libAddBtn = document.getElementById('lib-add');
+const libUploadBtn = document.getElementById('lib-upload-btn');
+const libUploadEl = document.getElementById('lib-upload');
+const libUploadName = document.getElementById('lib-upload-name');
+const libStatusEl = document.getElementById('lib-status');
+const libListEl = document.getElementById('lib-list');
+
+/**
+ * Switch between the four left-pane sub-tabs: Code (the editor), Project
+ * (the Nim working folder), Site (the deployed static webpage folder) and
+ * Libraries.
+ *
+ * @param {'code' | 'project' | 'site' | 'libs'} which
+ */
+function showTab(which) {
+  tabCode.classList.toggle('active', which === 'code');
+  tabProject.classList.toggle('active', which === 'project');
+  tabSite.classList.toggle('active', which === 'site');
+  tabLibs.classList.toggle('active', which === 'libs');
+  codeView.hidden = which !== 'code';
+  projectView.hidden = which !== 'project';
+  siteView.hidden = which !== 'site';
+  libsView.hidden = which !== 'libs';
+  if (which === 'libs') renderLibList();
+  if (which === 'project') renderWorkspaceTree();
+  if (which === 'site') renderSiteTree();
+}
+
+tabCode.addEventListener('click', () => showTab('code'));
+tabProject.addEventListener('click', () => showTab('project'));
+tabSite.addEventListener('click', () => showTab('site'));
+tabLibs.addEventListener('click', () => showTab('libs'));
+
+/**
+ * One-line status inside the Libraries panel.
+ *
+ * @param {string} msg
+ * @param {'busy' | 'ok' | 'err'} kind
+ */
+function libStatus(msg, kind) {
+  libStatusEl.textContent = msg;
+  libStatusEl.className = `visible ${kind}`;
+}
+
+/** Format a byte count compactly for the list rows. */
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/** Re-render the installed-libraries list from IndexedDB. */
+async function renderLibList() {
+  let libs = [];
+  try {
+    libs = await listLibs();
+  } catch (e) {
+    libListEl.innerHTML = '';
+    const div = document.createElement('div');
+    div.id = 'lib-empty';
+    div.textContent = `The library store is unavailable: ${e.message || e}`;
+    libListEl.appendChild(div);
+    return;
+  }
+  libCountEl.textContent = libs.length > 0 ? String(libs.length) : '';
+  libListEl.innerHTML = '';
+
+  if (libs.length === 0) {
+    const div = document.createElement('div');
+    div.id = 'lib-empty';
+    div.textContent = 'No libraries yet — add one from a GitHub link or a .zip above.';
+    libListEl.appendChild(div);
+    return;
+  }
+
+  for (const lib of libs) {
+    const item = document.createElement('div');
+    item.className = 'lib-item';
+
+    const main = document.createElement('div');
+    main.className = 'lib-item-main';
+
+    const name = document.createElement('div');
+    name.className = 'lib-item-name';
+    name.textContent = lib.name;
+    const mount = document.createElement('span');
+    mount.className = 'lib-mount';
+    mount.textContent = lib.mount;
+    name.appendChild(mount);
+    main.appendChild(name);
+
+    const meta = document.createElement('div');
+    meta.className = 'lib-item-meta';
+    const when = new Date(lib.addedAt).toLocaleString();
+    if (lib.source && lib.source.kind === 'github' && lib.source.url) {
+      const a = document.createElement('a');
+      a.href = lib.source.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = lib.source.url.replace(/^https?:\/\//, '');
+      meta.appendChild(a);
+      meta.appendChild(document.createTextNode(
+        `${lib.source.ref ? ` @ ${lib.source.ref}` : ''} · added ${when} · `));
+    } else {
+      meta.textContent = `zip upload${lib.source && lib.source.filename ? ` (${lib.source.filename})` : ''} · added ${when} · `;
+    }
+    meta.appendChild(document.createTextNode(`${lib.fileCount} files · ${fmtBytes(lib.totalBytes)}`));
+    if (lib.source && lib.source.via) {
+      meta.appendChild(document.createTextNode(` · via ${lib.source.via}`));
+    }
+    main.appendChild(meta);
+
+    if (lib.requires && lib.requires.length > 0) {
+      const req = document.createElement('div');
+      req.className = 'lib-item-requires';
+      req.textContent = `nimble requires: ${lib.requires.join(', ')}`;
+      main.appendChild(req);
+    }
+
+    const remove = document.createElement('button');
+    remove.className = 'lib-remove';
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', async () => {
+      try {
+        await deleteLib(lib.id);
+        log(`libraries: removed "${lib.name}" (applies on next Run)`, 'info');
+        renderLibList();
+      } catch (e) {
+        libStatus(`Could not remove ${lib.name}: ${e.message || e}`, 'err');
+      }
+    });
+
+    item.appendChild(main);
+    if (lib.requires && lib.requires.length > 0) {
+      const deps = document.createElement('button');
+      deps.className = 'lib-remove';
+      deps.style.color = 'var(--accent)';
+      deps.type = 'button';
+      deps.textContent = 'Deps…';
+      deps.title = 'Check / install missing dependencies';
+      deps.addEventListener('click', () => offerDependencies(lib));
+      item.appendChild(deps);
+    }
+    item.appendChild(remove);
+    libListEl.appendChild(item);
+  }
+}
+
+/** Shared busy/ok flow for the two add paths. */
+async function addLibrary(kind, payload) {
+  libAddBtn.disabled = true;
+  libUploadBtn.disabled = true;
+  try {
+    const lib = kind === 'github'
+      ? await importFromGitHub(payload, (m) => libStatus(m, 'busy'))
+      : await importFromZipFile(payload, (m) => libStatus(m, 'busy'));
+    libStatus(
+      `Added "${lib.name}" — ${lib.fileCount} files at ${lib.mount}. ` +
+      'Press Run to compile against it.',
+      'ok'
+    );
+    log(`libraries: added "${lib.name}" at ${lib.mount} (${lib.fileCount} files)`, 'ok');
+    libUrlEl.value = '';
+    libUploadName.textContent = '';
+    await renderLibList();
+    // Dependencies come last so the dialog opens on a settled list.
+    offerDependencies(lib);
+  } catch (e) {
+    libStatus(e.message || String(e), 'err');
+    log(`libraries: add failed: ${e.message || e}`, 'error');
+  } finally {
+    libAddBtn.disabled = false;
+    libUploadBtn.disabled = false;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Dependency resolution: after a library is added, its .nimble requirements
+ * are resolved against the official nimble registry and offered in a dialog;
+ * confirmed packages install recursively (each shows up in the list with a
+ * "via <parent>" note, so it can be checked and removed like any other).
+ * ------------------------------------------------------------------------ */
+
+const depModal = document.getElementById('dep-modal');
+const depSub = document.getElementById('dep-sub');
+const depList = document.getElementById('dep-list');
+const depInstallBtn = document.getElementById('dep-install');
+const depSkipBtn = document.getElementById('dep-skip');
+
+/**
+ * Dialog state. Rows: Map key -> {name, via, statusEl, approved, settled}.
+ * `approved` = the user explicitly confirmed this row (nothing installs
+ * without it). `settled` = installed / failed / declined — no longer
+ * actionable. Queue holds keys approved and waiting to install.
+ *
+ * @type {null | {rows: Map<string, object>, queue: string[], session: number,
+ *   registry: object|null, installedNow: object[]}}
+ */
+let depState = null;
+let depSessionCounter = 0;
+
+/** True when an installed record provides nimble package `key` (lowercase). */
+function libProvides(libs, key) {
+  return libs.some(
+    (l) => (l.pkgName && l.pkgName.toLowerCase() === key) || l.id === slugify(key)
+  );
+}
+
+/**
+ * Open the dependency dialog for a library, listing the requirements that
+ * are not installed yet. NOTHING installs until the user confirms; any
+ * transitive dependencies discovered while installing are held in the same
+ * dialog for a fresh approval round (never installed silently).
+ *
+ * @param {object} lib stored library metadata (requires: string[])
+ */
+async function offerDependencies(lib) {
+  const names = [...new Set(
+    (lib.requires || []).map((n) => n.trim()).filter((n) => n && n.toLowerCase() !== 'nim')
+  )];
+  if (names.length === 0) return;
+
+  let installed = [];
+  try { installed = await listLibs(); } catch (e) { /* empty store is fine */ }
+  const missing = names.filter((n) => !libProvides(installed, n.toLowerCase()));
+  if (missing.length === 0) {
+    log(`libraries: all dependencies of "${lib.name}" are already installed`, 'info');
+    return;
+  }
+
+  const session = ++depSessionCounter;
+  depState = { rows: new Map(), queue: [], session, registry: null, installedNow: installed };
+  depList.innerHTML = '';
+  depModal.classList.add('visible');
+  depModal.setAttribute('aria-hidden', 'false');
+  for (const name of missing) enqueueDep(name, lib.name);
+  enterApprovalMode(
+    `"${lib.name}" needs ${missing.length === 1 ? 'this package' : 'these packages'} ` +
+    '(from its .nimble file). Review them — nothing is installed until you confirm.'
+  );
+}
+
+/** Add one row to the dialog; the row starts unapproved (needs a click). */
+function enqueueDep(name, via) {
+  const key = name.toLowerCase();
+  if (!depState || depState.rows.has(key)) return;
+  if (libProvides(depState.installedNow, key)) return; // already there: no row
+  const row = document.createElement('div');
+  row.className = 'dep-row';
+  const nameEl = document.createElement('div');
+  nameEl.className = 'dep-row-name';
+  nameEl.textContent = name;
+  const viaEl = document.createElement('span');
+  viaEl.className = 'dep-via';
+  viaEl.textContent = ` (via ${via})`;
+  nameEl.appendChild(viaEl);
+  const statusEl = document.createElement('div');
+  statusEl.className = 'dep-row-status';
+  row.appendChild(nameEl);
+  row.appendChild(statusEl);
+  depList.appendChild(row);
+  depState.rows.set(key, { name, via, statusEl, approved: false, settled: false });
+  setDepStatus(key, 'needs approval', '');
+}
+
+function setDepStatus(key, state, detail) {
+  const entry = depState && depState.rows.get(key);
+  if (!entry) return;
+  const cls = state === 'installing' || state === 'looking up' || state === 'needs approval' ? 'busy'
+    : state === 'installed' || state === 'already installed' ? 'ok'
+    : state === 'declined' ? 'warn'
+    : state === 'failed' ? 'err' : '';
+  entry.statusEl.className = `dep-row-status ${cls}`;
+  entry.statusEl.textContent = detail ? `${state} — ${detail}` : state;
+}
+
+/** Rows the user has not approved yet and that are not settled. */
+function pendingDepRows() {
+  return [...depState.rows.entries()].filter(([, r]) => !r.settled && !r.approved);
+}
+
+/** Put the dialog into "waiting for the user's decision" mode. */
+function enterApprovalMode(subText) {
+  const pending = pendingDepRows();
+  depSub.textContent = subText;
+  depInstallBtn.textContent = pending.length === 1
+    ? 'Install 1 package'
+    : `Install ${pending.length} packages`;
+  depInstallBtn.disabled = pending.length === 0;
+  depSkipBtn.textContent = 'Decline';
+  depSkipBtn.disabled = false;
+}
+
+/** Put the dialog into its finished state (summary + Close). */
+function enterDoneMode() {
+  const rows = [...depState.rows.values()];
+  const failed = rows.filter((r) => r.statusEl.className.includes('err')).length;
+  const declined = rows.filter((r) => r.statusEl.className.includes('warn')).length;
+  if (declined > 0) {
+    depSub.textContent =
+      `Kept the installed packages; ${declined} package(s) were declined. ` +
+      'The compile may fail until you add them (Deps… button re-opens this).';
+  } else if (failed > 0) {
+    depSub.textContent =
+      `Done, but ${failed} package(s) could not be installed — add those manually (GitHub link or .zip).`;
+  } else {
+    depSub.textContent = 'All dependencies installed. Press Run to compile.';
+  }
+  depInstallBtn.textContent = 'Close';
+  depInstallBtn.disabled = false;
+  depSkipBtn.textContent = 'Close';
+  depSkipBtn.disabled = false;
+}
+
+function closeDepDialog() {
+  depModal.classList.remove('visible');
+  depModal.setAttribute('aria-hidden', 'true');
+  depSessionCounter++; // invalidate any in-flight install loop
+  depState = null;
+}
+
+depSkipBtn.addEventListener('click', () => {
+  if (!depState) { closeDepDialog(); return; }
+  if (depSkipBtn.textContent === 'Close') { closeDepDialog(); return; }
+  const anySettled = [...depState.rows.values()].some((r) => r.settled);
+  if (!anySettled) { closeDepDialog(); return; } // nothing installed yet: just bail
+  // Decline everything still pending — keep what is already installed.
+  for (const [key, r] of pendingDepRows()) {
+    r.settled = true;
+    setDepStatus(key, 'declined', 'kept out');
+    log(`libraries: dependency "${r.name}" declined by user`, 'info');
+  }
+  enterDoneMode();
+});
+depModal.querySelector('.dep-backdrop').addEventListener('click', () => {
+  if (depSkipBtn.disabled) return; // don't close mid-install by accident
+  closeDepDialog();
+});
+
+depInstallBtn.addEventListener('click', async () => {
+  if (!depState) { closeDepDialog(); return; }
+  if (depInstallBtn.textContent === 'Close') { closeDepDialog(); return; }
+
+  // Approve everything currently pending: it joins the install queue.
+  const pending = pendingDepRows();
+  if (pending.length === 0) return;
+  for (const [key, r] of pending) {
+    r.approved = true;
+    depState.queue.push(key);
+    setDepStatus(key, 'queued', '');
+  }
+  const session = depState.session;
+  depInstallBtn.disabled = true;
+  depSkipBtn.disabled = true;
+
+  if (!depState.registry) {
+    try {
+      depState.registry = await fetchRegistry();
+    } catch (e) {
+      depState.registry = null;
+    }
+  }
+  const registry = depState.registry;
+
+  let guard = 0;
+  while (depState && depState.session === session && depState.queue.length > 0 && guard++ < 50) {
+    const key = depState.queue.shift();
+    const entry = depState.rows.get(key);
+    if (!entry || entry.settled) continue;
+
+    if (libProvides(depState.installedNow, key)) {
+      entry.settled = true;
+      setDepStatus(key, 'already installed', '');
+      continue;
+    }
+    const pkg = registry ? registry.get(key) : null;
+    let parsed = null;
+    if (pkg) {
+      try { parsed = parseGitHubUrl(normalizeGitUrl(pkg.url)); } catch (e) { parsed = null; }
+    }
+    if (!parsed) {
+      entry.settled = true;
+      setDepStatus(key, 'failed', registry
+        ? (pkg ? 'not on github.com — add manually' : 'not in the nimble registry — add manually')
+        : 'nimble registry unavailable');
+      continue;
+    }
+
+    setDepStatus(key, 'looking up', `${parsed.owner}/${parsed.repo}`);
+    try {
+      const meta = await importFromGitHub(normalizeGitUrl(pkg.url), () => {}, { via: entry.via });
+      entry.settled = true;
+      setDepStatus(key, 'installed', `${meta.fileCount} files at ${meta.mount}`);
+      log(`libraries: installed dependency "${meta.name}" (via ${entry.via}) at ${meta.mount}`, 'ok');
+      depState.installedNow.push(meta);
+      renderLibList();
+      // Transitive deps: list them for a NEW approval round — never install
+      // anything the user has not seen and confirmed.
+      for (const depName of meta.requires || []) {
+        if (depName.toLowerCase() === 'nim') continue;
+        enqueueDep(depName, meta.name);
+      }
+    } catch (e) {
+      entry.settled = true;
+      setDepStatus(key, 'failed', e.message || 'download failed');
+      log(`libraries: dependency "${entry.name}" failed: ${e.message || e}`, 'warn');
+    }
+  }
+
+  if (!depState || depState.session !== session) return;
+  const stillPending = pendingDepRows();
+  if (stillPending.length > 0) {
+    // Round complete, new deps discovered: ask again before continuing.
+    enterApprovalMode(
+      `${stillPending.length === 1 ? 'One more package is' : `${stillPending.length} more packages are`} ` +
+      'required by the ones above. Review and install? (Declined packages are kept out.)'
+    );
+  } else {
+    enterDoneMode();
+  }
+});
+
+libAddBtn.addEventListener('click', () => {
+  const url = libUrlEl.value.trim();
+  if (!url) {
+    libStatus('Paste a GitHub repository link first.', 'err');
+    return;
+  }
+  addLibrary('github', url);
+});
+libUrlEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') libAddBtn.click();
+});
+
+libUploadBtn.addEventListener('click', () => libUploadEl.click());
+libUploadEl.addEventListener('change', () => {
+  const file = libUploadEl.files && libUploadEl.files[0];
+  libUploadEl.value = ''; // allow re-picking the same file
+  if (!file) return;
+  libUploadName.textContent = file.name;
+  addLibrary('zip', file);
+});
+
+// Keep the badge honest from the start (IndexedDB survives reloads).
+renderLibList();
+
+/* --------------------------------------------------------------------------
+ * Virtual folders (vfs.js): the Project tab is the Nim working folder —
+ * the codebase the editor edits and the compiler mounts at /workspace.
+ * The Site tab is the deployed static webpage folder — Build output; the
+ * app pane renders its index.html through blob: URLs.
+ * ------------------------------------------------------------------------ */
+
+const wsTreeEl = document.getElementById('ws-tree');
+const wsStatusEl = document.getElementById('ws-status');
+const wsNewFileBtn = document.getElementById('ws-new-file');
+const wsNewFolderBtn = document.getElementById('ws-new-folder');
+const wsUploadBtn = document.getElementById('ws-upload-btn');
+const wsUploadEl = document.getElementById('ws-upload');
+const siteTreeEl = document.getElementById('site-tree');
+const siteStatusEl = document.getElementById('site-status');
+const siteOpenTabBtn = document.getElementById('site-open-tab');
+const siteRefreshBtn = document.getElementById('site-refresh');
+const siteClearBtn = document.getElementById('site-clear');
+const siteUploadBtn = document.getElementById('site-upload-btn');
+const siteUploadEl = document.getElementById('site-upload');
+
+const textDecoder = new TextDecoder();
+
+/** Path of the workspace file currently open in the editor (null = none). */
+let openPath = 'main.nim';
+
+/** Collapsed folder paths per area (VS-Code-style tree state). */
+const collapsed = { [AREA_WORKSPACE]: new Set(), [AREA_SITE]: new Set() };
+
+/** One-line status inside a folder panel. */
+function vfsStatus(el, msg, kind) {
+  el.textContent = msg;
+  el.className = `visible ${kind}`;
+}
+
+/** Status pill narration shared by the Run and Build flows. */
+function narrateStep(msg) {
+  if (msg.includes('step 1')) setStatus('Translating Nim to C…', 'busy');
+  else if (msg.includes('step 2')) setStatus('Preparing the C code…', 'busy');
+  else if (msg.includes('step 3')) setStatus('Compiling C to WebAssembly…', 'busy');
+  else if (msg.includes('step 4')) setStatus('Running your app…', 'busy');
+}
+
+/* ----- the editor edits one workspace file at a time ----------------------*/
+
+let saveTimer = null;
+
+/** Debounced auto-save of the open file into the workspace store. */
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveOpenFile, 400);
+}
+
+/** Flush the editor contents into the workspace store (no-op if none open). */
+async function saveOpenFile() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  if (!openPath) return;
+  try {
+    await writeFile(AREA_WORKSPACE, openPath, editor.value);
+  } catch (e) {
+    log(`project: could not save ${openPath}: ${e.message || e}`, 'warn');
+  }
+}
+
+/** Load a workspace file into the editor and switch to the Code tab. */
+async function openFile(path) {
+  await saveOpenFile(); // flush the file we are leaving
+  const data = await readFile(AREA_WORKSPACE, path).catch(() => null);
+  if (!data) {
+    vfsStatus(wsStatusEl, `Could not open ${path}.`, 'err');
+    return;
+  }
+  if (isLikelyBinary(data)) {
+    vfsStatus(wsStatusEl, `"${path}" looks like a binary file — the editor only opens text.`, 'err');
+    return;
+  }
+  openPath = path;
+  editor.value = textDecoder.decode(data);
+  tabCode.textContent = baseName(path);
+  tabCode.title = path;
   updateLineNumbers();
   hideError();
-  log(`loaded example "${ex.label}" — press Run to try it`, 'info');
+  showTab('code');
+  renderWorkspaceTree(); // refresh the .open highlight
+}
+
+/**
+ * After a delete, make sure the editor is not pointing at a gone file:
+ * fall back to main.nim / the first .nim file, or an empty editor.
+ */
+async function ensureOpenFileValid() {
+  if (openPath) {
+    const data = await readFile(AREA_WORKSPACE, openPath).catch(() => null);
+    if (data) return;
+  }
+  let files = [];
+  try { files = await listFiles(AREA_WORKSPACE); } catch (e) { /* empty */ }
+  const real = files.filter((f) => !f.isDir);
+  const pick = real.find((f) => f.path === 'main.nim')
+    || real.find((f) => f.path.endsWith('.nim'))
+    || real[0];
+  openPath = null; // don't let openFile() re-save the deleted path
+  if (pick) {
+    await openFile(pick.path);
+  } else {
+    editor.value = '';
+    tabCode.textContent = 'Code';
+    tabCode.title = '';
+    updateLineNumbers();
+  }
+}
+
+/** First-run seed: an empty workspace gets the starter example as main.nim. */
+async function seedWorkspace() {
+  let files = [];
+  try {
+    files = await listFiles(AREA_WORKSPACE);
+  } catch (e) {
+    log(`project: file store unavailable (${e.message || e}) — edits will not persist`, 'warn');
+  }
+  let real = files.filter((f) => !f.isDir);
+  if (real.length === 0) {
+    try {
+      await writeFile(AREA_WORKSPACE, 'main.nim', EXAMPLES[0].source);
+      real = [{ path: 'main.nim', isDir: false }];
+    } catch (e) { /* read-only store: session-only editing still works */ }
+  }
+  const pick = real.find((f) => f.path === 'main.nim')
+    || real.find((f) => f.path.endsWith('.nim'))
+    || real[0];
+  if (pick) {
+    openPath = pick.path;
+    const data = await readFile(AREA_WORKSPACE, pick.path).catch(() => null);
+    if (data && !isLikelyBinary(data)) editor.value = textDecoder.decode(data);
+    tabCode.textContent = baseName(pick.path);
+    tabCode.title = pick.path;
+  }
+  updateLineNumbers();
+}
+
+/* ----- tree rendering (shared by Project and Site) ------------------------*/
+
+/** Build a nested node tree from flat vfs entries (folders may be implied). */
+function buildTree(entries) {
+  const root = { name: '', path: '', isDir: true, children: new Map() };
+  const ensureDir = (path) => {
+    let node = root;
+    let acc = '';
+    for (const seg of path.split('/')) {
+      acc = acc ? `${acc}/${seg}` : seg;
+      if (!node.children.has(acc)) {
+        node.children.set(acc, { name: seg, path: acc, isDir: true, children: new Map(), implied: true });
+      }
+      node = node.children.get(acc);
+    }
+    return node;
+  };
+  for (const e of entries) {
+    const segs = e.path.split('/');
+    if (e.isDir) {
+      const dir = ensureDir(e.path);
+      dir.implied = false;
+      dir.size = e.size;
+      dir.updatedAt = e.updatedAt;
+    } else {
+      const parent = segs.length > 1 ? ensureDir(segs.slice(0, -1).join('/')) : root;
+      parent.children.set(e.path, {
+        name: segs[segs.length - 1], path: e.path, isDir: false,
+        size: e.size, updatedAt: e.updatedAt, children: null,
+      });
+    }
+  }
+  return root;
+}
+
+/** Flatten the tree into visible rows (dirs first, honoring collapsed set). */
+function flattenTree(root, area) {
+  const rows = [];
+  const walk = (node, depth) => {
+    const kids = [...node.children.values()].sort((a, b) => (
+      a.isDir === b.isDir ? a.name.localeCompare(b.name) : (a.isDir ? -1 : 1)
+    ));
+    for (const kid of kids) {
+      rows.push({ node: kid, depth });
+      if (kid.isDir && !collapsed[area].has(kid.path)) walk(kid, depth + 1);
+    }
+  };
+  walk(root, 0);
+  return rows;
+}
+
+/** The inline "type a name" row used by New file / New folder / Rename. */
+function inlineInput(row, initial, onCommit) {
+  const input = document.createElement('input');
+  input.className = 'vfs-inline-input';
+  input.value = initial;
+  row.appendChild(input);
+  input.focus();
+  const slash = initial.lastIndexOf('/');
+  input.setSelectionRange(slash + 1, initial.length);
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const value = input.value.trim();
+    input.remove();
+    if (commit && value) onCommit(value);
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
+/** Rename a row in place (works for files and folders, both areas). */
+function startRename(row, node, area, refresh) {
+  const statusEl = area === AREA_WORKSPACE ? wsStatusEl : siteStatusEl;
+  const nameEl = row.querySelector('.vfs-name');
+  if (nameEl) nameEl.style.display = 'none'; // the input takes its place
+  inlineInput(row, node.path, async (target) => {
+    if (target === node.path) { refresh(); return; }
+    try {
+      await saveOpenFile(); // don't let a pending save resurrect the old path
+      const r = await renamePath(area, node.path, target);
+      log(`${area === AREA_WORKSPACE ? 'project' : 'site'}: renamed ${r.from} -> ${r.to}`, 'info');
+      if (area === AREA_WORKSPACE && openPath) {
+        if (openPath === r.from) openPath = r.to;
+        else if (openPath.startsWith(`${r.from}/`)) openPath = r.to + openPath.slice(r.from.length);
+        tabCode.textContent = baseName(openPath);
+        tabCode.title = openPath;
+      }
+    } catch (e) {
+      vfsStatus(statusEl, `Rename failed: ${e.message || e}`, 'err');
+    }
+    refresh();
+  });
+}
+
+/** Delete button; non-empty folders need a second click to confirm. */
+function makeDeleteButton(node, area, refresh) {
+  const statusEl = area === AREA_WORKSPACE ? wsStatusEl : siteStatusEl;
+  const btn = document.createElement('button');
+  btn.className = 'danger';
+  btn.textContent = 'del';
+  btn.title = node.isDir ? 'Delete this folder and everything in it' : 'Delete this file';
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const needsConfirm = node.isDir && node.children && node.children.size > 0;
+    if (needsConfirm && btn.dataset.armed !== '1') {
+      btn.dataset.armed = '1';
+      btn.textContent = 'sure?';
+      setTimeout(() => { btn.dataset.armed = ''; btn.textContent = 'del'; }, 3000);
+      return;
+    }
+    try {
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      const n = await deletePath(area, node.path);
+      log(`${area === AREA_WORKSPACE ? 'project' : 'site'}: deleted ${node.path} (${n} ${n === 1 ? 'entry' : 'entries'})`, 'info');
+      if (area === AREA_WORKSPACE) await ensureOpenFileValid();
+      else await renderSite();
+    } catch (err) {
+      vfsStatus(statusEl, `Delete failed: ${err.message || err}`, 'err');
+    }
+    refresh();
+  });
+  return btn;
+}
+
+/** One tree row. `extraActions` holds per-area buttons (e.g. download). */
+function treeRow(node, depth, area, { onOpen, extraActions = [], badge = null }) {
+  const row = document.createElement('div');
+  row.className = 'vfs-row';
+  if (node.isDir) row.classList.add('is-dir');
+  if (!node.isDir && area === AREA_WORKSPACE && node.path === openPath) row.classList.add('open');
+  row.style.paddingLeft = `${8 + depth * 14}px`;
+
+  const icon = document.createElement('span');
+  icon.className = 'vfs-icon';
+  icon.textContent = node.isDir ? (collapsed[area].has(node.path) ? '▸' : '▾') : '';
+  row.appendChild(icon);
+
+  const name = document.createElement('span');
+  name.className = 'vfs-name';
+  name.textContent = node.name;
+  name.title = node.path;
+  row.appendChild(name);
+
+  if (badge) {
+    const b = document.createElement('span');
+    b.className = 'vfs-entry-badge';
+    b.textContent = badge;
+    row.appendChild(b);
+  }
+
+  if (!node.isDir) {
+    const meta = document.createElement('span');
+    meta.className = 'vfs-meta';
+    meta.textContent = fmtBytes(node.size || 0);
+    row.appendChild(meta);
+  }
+
+  const actions = document.createElement('span');
+  actions.className = 'row-actions';
+  for (const extra of extraActions) actions.appendChild(extra);
+  const ren = document.createElement('button');
+  ren.textContent = 'ren';
+  ren.title = 'Rename / move';
+  ren.addEventListener('click', (e) => {
+    e.stopPropagation();
+    startRename(row, node, area, area === AREA_WORKSPACE ? renderWorkspaceTree : renderSiteTree);
+  });
+  actions.appendChild(ren);
+  actions.appendChild(makeDeleteButton(node, area, area === AREA_WORKSPACE ? renderWorkspaceTree : renderSiteTree));
+  row.appendChild(actions);
+
+  row.addEventListener('click', () => {
+    if (node.isDir) {
+      if (collapsed[area].has(node.path)) collapsed[area].delete(node.path);
+      else collapsed[area].add(node.path);
+      (area === AREA_WORKSPACE ? renderWorkspaceTree : renderSiteTree)();
+    } else if (onOpen) {
+      onOpen(node);
+    }
+  });
+  return row;
+}
+
+/** The "New file / New folder" inline input pinned at the top of a tree. */
+function newEntryRow(area, isDir, refresh) {
+  const row = document.createElement('div');
+  row.className = 'vfs-row';
+  const icon = document.createElement('span');
+  icon.className = 'vfs-icon';
+  row.appendChild(icon);
+  inlineInput(row, '', async (value) => {
+    try {
+      if (isDir) {
+        const p = await makeDir(area, value);
+        log(`${area === AREA_WORKSPACE ? 'project' : 'site'}: new folder ${p}`, 'info');
+      } else {
+        const p = await writeFile(area, value, '');
+        log(`${area === AREA_WORKSPACE ? 'project' : 'site'}: new file ${p}`, 'info');
+        if (area === AREA_WORKSPACE && p.endsWith('.nim')) {
+          refresh();
+          await openFile(p);
+          return;
+        }
+      }
+    } catch (e) {
+      vfsStatus(area === AREA_WORKSPACE ? wsStatusEl : siteStatusEl, e.message || String(e), 'err');
+    }
+    refresh();
+  });
+  return row;
+}
+
+/* ----- Project tab (Nim working folder) ------------------------------------*/
+
+async function renderWorkspaceTree() {
+  let entries = [];
+  try {
+    entries = await listFiles(AREA_WORKSPACE);
+  } catch (e) {
+    wsTreeEl.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'vfs-empty';
+    div.textContent = `The file store is unavailable: ${e.message || e}`;
+    wsTreeEl.appendChild(div);
+    return;
+  }
+  wsTreeEl.innerHTML = '';
+  if (entries.length === 0) {
+    const div = document.createElement('div');
+    div.className = 'vfs-empty';
+    div.textContent = 'Empty folder — use "New file" to get started.';
+    wsTreeEl.appendChild(div);
+    return;
+  }
+  for (const { node, depth } of flattenTree(buildTree(entries), AREA_WORKSPACE)) {
+    wsTreeEl.appendChild(treeRow(node, depth, AREA_WORKSPACE, {
+      onOpen: (n) => openFile(n.path),
+      badge: node.path === 'main.nim' ? 'build entry' : null,
+    }));
+  }
+}
+
+wsNewFileBtn.addEventListener('click', () => {
+  wsTreeEl.prepend(newEntryRow(AREA_WORKSPACE, false, renderWorkspaceTree));
 });
+wsNewFolderBtn.addEventListener('click', () => {
+  wsTreeEl.prepend(newEntryRow(AREA_WORKSPACE, true, renderWorkspaceTree));
+});
+wsUploadBtn.addEventListener('click', () => wsUploadEl.click());
+wsUploadEl.addEventListener('change', async () => {
+  const files = [...(wsUploadEl.files || [])];
+  wsUploadEl.value = '';
+  for (const file of files) {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await writeFile(AREA_WORKSPACE, file.name, bytes);
+      log(`project: uploaded ${file.name} (${fmtBytes(bytes.length)})`, 'info');
+    } catch (e) {
+      vfsStatus(wsStatusEl, `Upload of ${file.name} failed: ${e.message || e}`, 'err');
+    }
+  }
+  renderWorkspaceTree();
+});
+
+/* ----- Site tab (deployed static webpage folder) ---------------------------*/
+
+/** Blob URLs backing the app-pane site preview; revoked on each re-render. */
+let siteBlobUrls = [];
+
+/**
+ * Render the deployed site folder into the app pane: every file becomes a
+ * blob: URL, quoted references in index.html are rewritten to them, and
+ * the result runs in an iframe that fills the pane. Returns false when
+ * there is no index.html yet.
+ */
+async function renderSite() {
+  let files;
+  try {
+    files = await getFilesWithData(AREA_SITE);
+  } catch (e) {
+    return false;
+  }
+  const index = files.find((f) => f.path === 'index.html');
+  if (!index) return false;
+  for (const u of siteBlobUrls) URL.revokeObjectURL(u);
+  siteBlobUrls = [];
+  const urlMap = new Map();
+  for (const f of files) {
+    const url = URL.createObjectURL(new Blob([f.data], { type: mimeFor(f.path) }));
+    siteBlobUrls.push(url);
+    urlMap.set(f.path, url);
+  }
+  const html = rewriteSiteUrls(textDecoder.decode(index.data), urlMap);
+  outputEl.innerHTML = '';
+  outputEl.classList.add('site-mode');
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('title', 'deployed site preview');
+  iframe.srcdoc = html;
+  outputEl.appendChild(iframe);
+  return true;
+}
+
+async function renderSiteTree() {
+  let entries = [];
+  try {
+    entries = await listFiles(AREA_SITE);
+  } catch (e) {
+    siteTreeEl.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'vfs-empty';
+    div.textContent = `The file store is unavailable: ${e.message || e}`;
+    siteTreeEl.appendChild(div);
+    return;
+  }
+  siteTreeEl.innerHTML = '';
+  if (entries.length === 0) {
+    const div = document.createElement('div');
+    div.className = 'vfs-empty';
+    div.textContent = 'Nothing deployed yet — press Build to compile your project into this folder.';
+    siteTreeEl.appendChild(div);
+    return;
+  }
+  for (const { node, depth } of flattenTree(buildTree(entries), AREA_SITE)) {
+    const dl = document.createElement('button');
+    dl.textContent = 'save';
+    dl.title = 'Download this file';
+    dl.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const data = await readFile(AREA_SITE, node.path).catch(() => null);
+      if (!data) return;
+      const url = URL.createObjectURL(new Blob([data], { type: mimeFor(node.path) }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = baseName(node.path);
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    });
+    siteTreeEl.appendChild(treeRow(node, depth, AREA_SITE, {
+      extraActions: node.isDir ? [] : [dl],
+      badge: node.path === 'index.html' ? 'entry' : null,
+    }));
+  }
+}
+
+siteOpenTabBtn.addEventListener('click', async () => {
+  const files = await getFilesWithData(AREA_SITE).catch(() => []);
+  const index = files.find((f) => f.path === 'index.html');
+  if (!index) {
+    vfsStatus(siteStatusEl, 'No site yet — press Build first.', 'err');
+    return;
+  }
+  const urlMap = new Map();
+  for (const f of files) {
+    urlMap.set(f.path, URL.createObjectURL(new Blob([f.data], { type: mimeFor(f.path) })));
+  }
+  const html = rewriteSiteUrls(textDecoder.decode(index.data), urlMap);
+  const pageUrl = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  // Deliberately not revoked: the new tab reads these URLs for its lifetime.
+  window.open(pageUrl, '_blank', 'noopener');
+});
+
+siteRefreshBtn.addEventListener('click', async () => {
+  if (await renderSite()) {
+    vfsStatus(siteStatusEl, 'The app pane is showing this folder’s index.html.', 'ok');
+  } else {
+    vfsStatus(siteStatusEl, 'No index.html in this folder yet — press Build first.', 'err');
+  }
+});
+
+siteClearBtn.addEventListener('click', async () => {
+  if (siteClearBtn.dataset.armed !== '1') {
+    siteClearBtn.dataset.armed = '1';
+    siteClearBtn.textContent = 'Really clear?';
+    setTimeout(() => { siteClearBtn.dataset.armed = ''; siteClearBtn.textContent = 'Clear…'; }, 3000);
+    return;
+  }
+  siteClearBtn.dataset.armed = '';
+  siteClearBtn.textContent = 'Clear…';
+  await clearArea(AREA_SITE);
+  outputEl.classList.remove('site-mode');
+  outputEl.innerHTML = '';
+  log('site: folder cleared', 'info');
+  renderSiteTree();
+});
+
+siteUploadBtn.addEventListener('click', () => siteUploadEl.click());
+siteUploadEl.addEventListener('change', async () => {
+  const files = [...(siteUploadEl.files || [])];
+  siteUploadEl.value = '';
+  for (const file of files) {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await writeFile(AREA_SITE, file.name, bytes);
+      log(`site: uploaded ${file.name} (${fmtBytes(bytes.length)})`, 'info');
+    } catch (e) {
+      vfsStatus(siteStatusEl, `Upload of ${file.name} failed: ${e.message || e}`, 'err');
+    }
+  }
+  renderSiteTree();
+});
+
+/* ----- Build: compile the project into the Site folder ---------------------*/
+
+/** Runtime modules fetched + stripped once per session, reused per Build. */
+let siteRuntimeCache = null;
+
+async function loadRuntimeForSite() {
+  if (siteRuntimeCache) return siteRuntimeCache;
+  const map = new Map();
+  for (const f of RUNTIME_SITE_FILES) {
+    const res = await fetch(f.src);
+    if (!res.ok) throw new Error(`could not load ${f.src} (HTTP ${res.status})`);
+    map.set(f.dest, stripEsmExports(await res.text()));
+  }
+  siteRuntimeCache = map;
+  return map;
+}
 
 /* --------------------------------------------------------------------------
  * First-visit download with honest byte counting (SPEC §8c).
@@ -493,10 +1576,10 @@ function friendlyError(result) {
   ].filter((s) => s && s.trim()).join('\n\n');
 
   if (result.stage === 'nim') {
-    // Typical Nim error: "/project/main.nim(4, 10) Error: undeclared identifier: 'foo'"
-    const m = /main\.nim\((\d+),\s*\d+\)\s*Error:\s*(.+)/.exec(result.nimStderr || '');
+    // Typical Nim error: "/workspace/main.nim(4, 10) Error: undeclared identifier: 'foo'"
+    const m = /([\w./-]+\.nim)\((\d+),\s*\d+\)\s*Error:\s*(.+)/.exec(result.nimStderr || '');
     if (m) {
-      return { summary: `The Nim compiler didn't understand line ${m[1]}: ${m[2]}`, raw };
+      return { summary: `The Nim compiler didn't understand ${m[1]} line ${m[2]}: ${m[3]}`, raw };
     }
     return { summary: "The Nim compiler couldn't understand your code. Details below.", raw };
   }
@@ -520,12 +1603,19 @@ async function init() {
       libpacksUrl: config.libpacksUrl,
       onLog: log,
       preloaded,
+      // User-installed libraries from IndexedDB are re-read (and re-mounted
+      // at /libs/<name>) on every compile.
+      userLibs: getLibsWithFiles,
+      // The Nim working folder (Project tab) is re-read and mounted at
+      // /workspace on every compile, so multi-file projects just work.
+      workspace: () => getFilesWithData(AREA_WORKSPACE),
     });
     clang = new ClangCompiler({ vendorUrl: config.vendorUrl, onLog: log });
     await Promise.all([nim.init(), clang.init()]);
     setStatus('Ready — press Run', 'ok');
     log('ready — press Run to build and run your program', 'ok');
     runBtn.disabled = false;
+    buildBtn.disabled = false;
   } catch (e) {
     setStatus('The compiler failed to load', 'err');
     log(`initialization failed: ${e.message || e}`, 'error');
@@ -536,8 +1626,23 @@ async function init() {
   }
 }
 
+/**
+ * Run: compile the file open in the editor (inside the mounted workspace,
+ * so its sibling imports resolve) and run it right in the app pane.
+ */
 runBtn.addEventListener('click', async () => {
+  if (!openPath || !openPath.endsWith('.nim')) {
+    showError(
+      'Open a .nim file to run it.',
+      'The Run button compiles the file currently open in the editor. ' +
+      'Open a .nim file from the Project tab, then press Run again.'
+    );
+    return;
+  }
   runBtn.disabled = true;
+  buildBtn.disabled = true;
+  await saveOpenFile();
+  outputEl.classList.remove('site-mode'); // leave the deployed-site view
   consoleEl.innerHTML = '';
   outputEl.innerHTML = '';
   hideError();
@@ -545,6 +1650,7 @@ runBtn.addEventListener('click', async () => {
   try {
     const result = await compileAndRun({
       source: editor.value,
+      outFile: `/workspace/${openPath}`,
       nim,
       clang,
       runtime: { createBindwebRunner },
@@ -552,12 +1658,7 @@ runBtn.addEventListener('click', async () => {
       onLog: (msg, kind) => {
         log(msg, kind);
         // Plain-English status narration for each pipeline stage (SPEC §8c).
-        if (kind === 'step') {
-          if (msg.includes('step 1')) setStatus('Translating Nim to C…', 'busy');
-          else if (msg.includes('step 2')) setStatus('Preparing the C code…', 'busy');
-          else if (msg.includes('step 3')) setStatus('Compiling C to WebAssembly…', 'busy');
-          else if (msg.includes('step 4')) setStatus('Running your app…', 'busy');
-        }
+        if (kind === 'step') narrateStep(msg);
       },
     });
     const dt = ((performance.now() - t0) / 1000).toFixed(1);
@@ -575,9 +1676,101 @@ runBtn.addEventListener('click', async () => {
     log(`pipeline error: ${e.message || e}`, 'error');
   } finally {
     runBtn.disabled = false;
+    buildBtn.disabled = false;
   }
 });
 
-editor.value = EXAMPLES[0].source;
-updateLineNumbers();
-init();
+/**
+ * Build: compile the project entry (main.nim, falling back to the open
+ * file) into the deployed static webpage folder (Site tab), then show the
+ * site in the app pane. app.wasm and nim-runtime/* are always refreshed;
+ * index.html is regenerated only while it still carries the generated
+ * marker, so hand edits survive the next Build.
+ */
+buildBtn.addEventListener('click', async () => {
+  buildBtn.disabled = true;
+  runBtn.disabled = true;
+  consoleEl.innerHTML = '';
+  hideError();
+  const t0 = performance.now();
+  try {
+    await saveOpenFile();
+    let entry = 'main.nim';
+    const entryData = await readFile(AREA_WORKSPACE, 'main.nim').catch(() => null);
+    if (!entryData) {
+      if (openPath && openPath.endsWith('.nim')) {
+        entry = openPath;
+      } else {
+        showError(
+          'Nothing to build yet.',
+          'Build compiles the project entry file "main.nim" (or the .nim file open in the editor). ' +
+          'Create one in the Project tab, then press Build again.'
+        );
+        return;
+      }
+    }
+    const source = entry === openPath ? editor.value : textDecoder.decode(entryData);
+    log(`build: compiling project entry "${entry}"`, 'step');
+    const result = await compileToWasm({
+      source,
+      outFile: `/workspace/${entry}`,
+      nim,
+      clang,
+      onLog: (msg, kind) => {
+        log(msg, kind);
+        if (kind === 'step') narrateStep(msg);
+      },
+    });
+    if (!result.ok) {
+      const { summary, raw } = friendlyError(result);
+      setStatus('Build failed — see the message below', 'err');
+      showError(summary, raw);
+      log(summary, 'error');
+      return;
+    }
+
+    setStatus('Deploying to the Site folder…', 'busy');
+    await writeFile(AREA_SITE, 'app.wasm', result.wasm);
+    const runtime = await loadRuntimeForSite();
+    for (const [dest, text] of runtime) {
+      await writeFile(AREA_SITE, dest, text);
+    }
+    await writeFile(AREA_SITE, 'nim-runtime/boot.js', SITE_BOOT_JS);
+    const existingIndex = await readFile(AREA_SITE, 'index.html').catch(() => null);
+    const existingText = existingIndex ? textDecoder.decode(existingIndex) : null;
+    if (!existingText || existingText.includes(SITE_GENERATED_MARKER)) {
+      await writeFile(AREA_SITE, 'index.html', generateSiteIndex(entry));
+      log('build: index.html generated', 'info');
+    } else {
+      log('build: keeping your hand-edited index.html (not regenerated)', 'info');
+    }
+
+    await renderSite();
+    renderSiteTree();
+    const dt = ((performance.now() - t0) / 1000).toFixed(1);
+    setStatus(`Site deployed — built in ${dt}s`, 'ok');
+    log(`build: deployed ${entry} -> Site folder (app.wasm ${result.wasm.length} bytes + index.html + nim-runtime/) — the app pane shows the site`, 'ok');
+  } catch (e) {
+    setStatus('Build failed — see the message below', 'err');
+    showError('The build stopped unexpectedly. Details below.', e.stack || String(e));
+    log(`build error: ${e.message || e}`, 'error');
+  } finally {
+    buildBtn.disabled = false;
+    runBtn.disabled = false;
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * Startup: load the working folder into the editor, restore a previously
+ * deployed site into the app pane, then start the toolchains.
+ * ------------------------------------------------------------------------ */
+
+(async () => {
+  await seedWorkspace();
+  try {
+    if (await renderSite()) {
+      log('site: showing your deployed site from the last session', 'info');
+    }
+  } catch (e) { /* no site yet */ }
+  init();
+})();

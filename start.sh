@@ -7,7 +7,8 @@
 #       in-browser Nim compiler at http://localhost:8080, in four steps:
 #
 #         [1/4] Download the C compiler (prebuilt — no hours-long build)
-#         [2/4] Build the Nim compiler (skipped entirely if already built)
+#         [2/4] Download the Nim compiler (prebuilt; built from source only
+#               as a fallback, and skipped entirely if already present)
 #         [3/4] Pack the libraries and assemble the app (dist/)
 #         [4/4] Start a local server and open your web browser
 #
@@ -18,9 +19,9 @@
 #
 # HOW:  Every step checks its own preconditions and, when something is
 #       missing, prints a plain-language message telling you exactly what
-#       to install or click next. Nothing is built from source except the
-#       Nim compiler itself, and that prefers Docker so you need no local
-#       toolchain at all.
+#       to install or click next. Both compilers are downloaded prebuilt
+#       (SHA-256 pinned); only if that download fails is the Nim compiler
+#       built from source, preferring Docker so you need no local toolchain.
 # =============================================================================
 
 # If we were launched as "sh start.sh" with a non-bash shell (e.g. dash on
@@ -116,14 +117,19 @@ else
 fi
 
 # =============================================================================
-# Step [2/4]: nim.wasm — the only thing ever compiled. Prefer Docker (zero
-# local dependencies); fall back to a native emsdk; skip if already built.
+# Step [2/4]: nim.wasm. Fast path: download the pinned prebuilt toolchain
+# (seconds, SHA-256 verified). Fallback: build from source — prefer Docker
+# (zero local dependencies), then a native emsdk. Skip if already present.
 # =============================================================================
 if [[ -f "$VENDOR_NIM_DIR/nim.wasm" ]]; then
-  step "2/4" "Building the Nim compiler (first time only)..."
-  ok "Already built earlier - skipping."
+  step "2/4" "Getting the Nim compiler (first time only)..."
+  ok "Already present - skipping."
 else
-  step "2/4" "Building the Nim compiler (first time only; this can take 20-40 minutes)..."
+  step "2/4" "Getting the Nim compiler (first time only)..."
+  if have curl && ./build.sh nim-fetch; then
+    ok "Downloaded the prebuilt Nim compiler."
+  else
+    ok "Prebuilt download unavailable - building from source instead (this can take 20-40 minutes)..."
   if docker_ready; then
     ok "Using Docker - nothing else to install."
     if ! ./build.sh nim-docker; then
@@ -163,6 +169,7 @@ else
         "Read the technical message above. Docker is an alternative:" \
         "https://www.docker.com/products/docker-desktop/"
     fi
+  fi
   fi
   ok "Done."
 fi
