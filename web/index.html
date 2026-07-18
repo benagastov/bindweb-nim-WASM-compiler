@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<!--
+  index.html — nim-wasm-compiler IDE shell.
+
+  A beginner-friendly, one-click Nim -> WebAssembly playground that runs
+  entirely in the browser. No frameworks, no build step: this page loads
+  web/src/main.js as an ES module. All CSS lives in the <style> block so
+  web/ stays self-contained (SPEC §8c). Served over plain http from the
+  dist root (tools/make-dist.sh copies web/ to dist/ and adds vendor/ and
+  libpacks/ as siblings).
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nim Playground — runs in your browser</title>
+<style>
+  :root {
+    /* Dark-neutral, low-saturation palette (SPEC §8c: no gradients). */
+    --bg: #14161a;
+    --bg-raised: #1b1e24;
+    --bg-inset: #101216;
+    --border: #2c313a;
+    --text: #d6d9de;
+    --text-dim: #8a919c;
+    --text-faint: #5d646f;
+    --accent: #7a9cc6;
+    --accent-dim: #3d5069;
+    --ok: #7da87b;
+    --warn: #c2a86b;
+    --err: #c07a7a;
+    --err-bg: #2a1d1f;
+    --mono: ui-monospace, "Cascadia Code", "Fira Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ---- toolbar ---- */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 24px;
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  header .title {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+
+  header .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .examples-label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  #examples {
+    background: var(--bg-inset);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  #examples:disabled { color: var(--text-faint); cursor: default; }
+
+  header .spacer { flex: 1; }
+
+  #status {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 5px 14px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-inset);
+    white-space: nowrap;
+    max-width: 46ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #status.busy { color: var(--accent); border-color: var(--accent-dim); }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--err); }
+
+  /* The one big primary control (SPEC §8c). */
+  #btn-run {
+    padding: 11px 34px;
+    background: var(--accent-dim);
+    color: var(--text);
+    border: 1px solid var(--accent-dim);
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  #btn-run:hover:not(:disabled) { background: var(--accent); color: #10131a; }
+  #btn-run:disabled {
+    background: var(--bg-inset);
+    border-color: var(--border);
+    color: var(--text-faint);
+    cursor: not-allowed;
+  }
+
+  /* ---- first-visit download progress (SPEC §8c) ---- */
+  #progress-wrap {
+    display: none;
+    padding: 10px 24px;
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #progress-wrap.visible { display: block; }
+
+  #progress-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  #progress-track {
+    height: 6px;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  #progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent-dim);
+    border-radius: 999px;
+    transition: width 0.2s ease;
+  }
+
+  /* ---- main split: editor left, output+console right ---- */
+  main {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .pane-label {
+    padding: 8px 16px;
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    flex-shrink: 0;
+  }
+
+  #editor-pane {
+    width: 50%;
+    border-right: 1px solid var(--border);
+  }
+
+  .editor-wrap {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    background: var(--bg-inset);
+  }
+
+  #line-numbers {
+    padding: 16px 12px 16px 20px;
+    text-align: right;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    user-select: none;
+    overflow: hidden;
+    white-space: pre;
+    flex-shrink: 0;
+  }
+
+  #editor {
+    flex: 1;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 16px 20px 16px 12px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    tab-size: 2;
+    white-space: pre;
+    overflow: auto;
+  }
+
+  /* ---- right column: the running app is the hero, console below ---- */
+  #right-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  #app-pane {
+    flex: 1.4;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #app-output {
+    flex: 1;
+    overflow: auto;
+    padding: 24px;
+    /* Light, neutral surface: the app is the hero (SPEC §8c) and DOM apps
+       read like a normal web page out of the box. */
+    background: #f2f3f4;
+    color: #1a1d22;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+  }
+
+  #app-output:empty::before {
+    content: "Your app will appear here after you press Run.";
+    color: var(--text-faint);
+    font-size: 13px;
+    margin: auto;
+  }
+
+  /* Friendly error box (SPEC §8c): one-line plain summary, raw output
+     collapsible. Rendered at the top of the console pane. */
+  #error-box {
+    display: none;
+    margin: 12px 16px 0;
+    padding: 12px 14px;
+    background: var(--err-bg);
+    border: 1px solid var(--err);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  #error-box.visible { display: block; }
+  #error-summary { color: var(--err); font-weight: 600; }
+  #error-box details { margin-top: 8px; }
+  #error-box summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  #error-raw {
+    margin-top: 8px;
+    padding: 10px;
+    background: var(--bg-inset);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow: auto;
+  }
+
+  #console-pane {
+    flex: 1;
+  }
+
+  #console {
+    flex: 1;
+    overflow: auto;
+    padding: 12px 16px;
+    background: var(--bg-inset);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  #console .line { white-space: pre-wrap; word-break: break-word; }
+  #console .t { color: var(--text-faint); margin-right: 8px; }
+  #console .step { color: var(--accent); font-weight: 600; margin-top: 6px; }
+  #console .info { color: var(--text-dim); }
+  #console .ok { color: var(--ok); }
+  #console .warn { color: var(--warn); }
+  #console .error, #console .stderr { color: var(--err); }
+  #console .stdout { color: var(--text); }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">Nim Playground</span>
+    <span class="subtitle">write Nim, run it right here</span>
+    <label class="examples-label" for="examples">Examples</label>
+    <select id="examples" disabled>
+      <option value="" selected>Load an example…</option>
+    </select>
+    <span class="spacer"></span>
+    <span id="status">Getting ready…</span>
+    <button id="btn-run" disabled>Run</button>
+  </header>
+
+  <div id="progress-wrap">
+    <div id="progress-label">Downloading the compiler (first visit only)…</div>
+    <div id="progress-track"><div id="progress-bar"></div></div>
+  </div>
+
+  <main>
+    <section class="pane" id="editor-pane">
+      <div class="pane-label">Your Nim code</div>
+      <div class="editor-wrap">
+        <div id="line-numbers">1</div>
+        <textarea id="editor" spellcheck="false" wrap="off"></textarea>
+      </div>
+    </section>
+
+    <section id="right-pane">
+      <div class="pane" id="app-pane">
+        <div class="pane-label">Your app</div>
+        <div id="app-output"></div>
+      </div>
+      <div class="pane" id="console-pane">
+        <div class="pane-label">Messages</div>
+        <div id="error-box">
+          <div id="error-summary"></div>
+          <details>
+            <summary>Technical details (for helpers)</summary>
+            <div id="error-raw"></div>
+          </details>
+        </div>
+        <div id="console"></div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# SHA-256 of every fetched clang-side artifact (clang.js npm package v0.1.1).
+# fetch-clang.sh verifies each downloaded file against these and REFUSES to
+# install on mismatch. Do not edit by hand unless you re-pin the version in
+# versions.env — regenerate with:  sha256sum clang.wasm lld.wasm memfs.wasm sysroot.tar
+
+# npm tarball itself (mirror 1, registry.npmjs.org)
+clang.js-0.1.1.tgz  24214098d99c8d25931cfde51847fcdf848699d90b5cd6aeed4b497ad08e059b
+
+# Artifacts extracted from the tarball's dist/ (verified individually):
+clang.wasm   2a466f0e990329d3230b869d04fc20803eae96a7feb3a3f6c93e25a77b8aed1d
+lld.wasm     36419ed202011765222098d7701218378b67f634d50f0a4625059ae2c9860f48
+memfs.wasm   2c72ee42bd9430029dda8c6bafc9f37143f6fe88d5f1ea950a70259ab748bcfe
+sysroot.tar  2435a7b549af30c2be7ec249c405bc2e911ab0c6003012f0909ec3c131bff867
+
+# Note: clang.js (the JS driver) is NOT fetched — the proven, fully patched
+# copy ships in the repo at toolchain/vendor-src/clang.js (see PROVENANCE.md).

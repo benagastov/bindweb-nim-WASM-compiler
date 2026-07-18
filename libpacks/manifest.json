@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "name": "nim-config",
+      "file": "nim-config.tar",
+      "mount": "/nim/config",
+      "strip": 1,
+      "required": false
+    },
+    {
+      "name": "bindweb",
+      "file": "bindweb.tar",
+      "mount": "/bindweb",
+      "strip": 1,
+      "required": false
+    },
+    {
+      "name": "nim-stdlib",
+      "file": "nim-stdlib.tar",
+      "mount": "/nim/lib",
+      "strip": 1,
+      "required": false
+    }
+  ]
+}
