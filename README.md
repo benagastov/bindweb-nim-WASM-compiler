@@ -33,13 +33,14 @@ What `start.sh` does, in plain terms:
 | Step | Action | Skipped when |
 |------|--------|--------------|
 | 1/4 | Downloads the prebuilt clang toolchain (npm `clang.js@0.1.1`, hash-verified) | already in `web/vendor/clang/` |
-| 2/4 | Builds `nim.wasm` from Nim source (Docker preferred, native emsdk fallback) | `web/vendor/nim/nim.wasm` exists |
+| 2/4 | Builds `nim.wasm` from Nim source (Docker preferred; otherwise a local emsdk, else one is provisioned automatically) | `web/vendor/nim/nim.wasm` exists |
 | 3/4 | Packs libpacks and assembles `dist/` | packs are newer than their sources |
 | 4/4 | Serves `dist/` on http://localhost:8080 and opens your browser | already serving |
 
 Power users get finer control:
 
 ```bash
+./build.sh setup      # prepare a bare machine: base deps + pinned emsdk
 ./build.sh clang      # only fetch/verify the clang toolchain
 ./build.sh nim        # only build nim.wasm (the "edit Nim compiler features" target)
 ./build.sh nim-docker # same, inside Docker (zero local deps beyond Docker)
@@ -77,8 +78,19 @@ tools/pack-lib.sh mylib path/to/mylib/src /mylib
 
 This writes `libpacks/mylib.tar` and registers it in `libpacks/manifest.json`.
 Re-run `./build.sh dist` (or `./start.sh`) and the IDE mounts it at `/mylib`
-before every compile — `import mylib` just works. **The compiler is not
-rebuilt.** See `libpacks/README.md` for details and conventions.
+before every compile. **The compiler is not rebuilt.**
+
+Mounting only puts the files in the in-browser filesystem — it does **not** put
+them on Nim's module search path. For a new mount point, add it to `NIM_FLAGS`
+in `web/src/nim-compiler.js`:
+
+```js
+'--path:/bindweb', '--path:/bindweb/nim', '--path:/nim/lib', '--path:/mylib',
+```
+
+Without that, `import mylib` fails with `Error: cannot open file: mylib`. (The
+shipped packs already have their paths registered, which is why `import bindweb`
+works out of the box.) See `libpacks/README.md` for details and conventions.
 
 Shipped packs:
 
