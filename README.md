@@ -1,4 +1,4 @@
-# Demo2b — Nim → WebAssembly in-browser IDE
+# Nim → WebAssembly in-browser IDE
 
 A one-command rebuild of the in-browser Nim → WebAssembly IDE. `start.sh` (or
 `start.bat` on Windows) takes a fresh clone to a running IDE on
