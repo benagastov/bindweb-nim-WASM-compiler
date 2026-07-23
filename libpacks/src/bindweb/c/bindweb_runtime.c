@@ -262,6 +262,21 @@ void bindweb_flush(void) {
 }
 
 /* ============================================================================
+ * SECTION 4b: Domain Binding
+ * ============================================================================
+ * Thin bridge to the JS domain guard (env.bindweb_js_domain_guard). The
+ * domain string is passed straight from Nim memory; JS reads [domain,
+ * domain+len) from wasm memory, normalizes both it and location.hostname,
+ * and returns 1 on match (or in dev mode) / 0 on mismatch — after which it
+ * has already locked the page, so the Nim side just quits.
+ * ============================================================================ */
+
+__attribute__((used, visibility("default")))
+int bindweb_check_domain(const char* domain, uint32_t len) {
+    return bindweb_js_domain_guard(domain, len);
+}
+
+/* ============================================================================
  * SECTION 5: Allocator
  * ============================================================================
  * A simple free-list allocator with bump-allocation fallback.

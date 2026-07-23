@@ -40,6 +40,13 @@ extern "C" {
 __attribute__((import_module("env"), import_name("bindweb_js_flush")))
 extern void bindweb_js_flush(uintptr_t ptr, size_t size);
 
+/* Domain guard: the JS host compares the NUL-free domain string at
+ * [domain, domain+len) against location.hostname. Returns 1 on match
+ * (or in dev mode), 0 on mismatch — in which case the JS side has already
+ * locked the page. */
+__attribute__((import_module("env"), import_name("bindweb_js_domain_guard")))
+extern int bindweb_js_domain_guard(const char* domain, uint32_t len);
+
 /* ----------------------------------------------------------------------------
  * Command Buffer
  * ---------------------------------------------------------------------------- */
@@ -112,6 +119,13 @@ const uint8_t* bindweb_scratch_buffer_data(void);
 
 __attribute__((used, visibility("default")))
 void bindweb_flush(void);
+
+/* ----------------------------------------------------------------------------
+ * Domain Binding
+ * ---------------------------------------------------------------------------- */
+
+__attribute__((used, visibility("default")))
+int bindweb_check_domain(const char* domain, uint32_t len);
 
 /* ----------------------------------------------------------------------------
  * Allocator

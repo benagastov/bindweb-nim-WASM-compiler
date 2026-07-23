@@ -742,7 +742,7 @@
     </select>
     <span class="spacer"></span>
     <span id="status">Getting ready…</span>
-    <button id="btn-build" disabled title="Compile the project (entry: main.nim) into the deployed site folder">Build</button>
+    <button id="btn-build" disabled title="Compile every .nim file in the project into the deployed site folder (entry: main.nim)">Build</button>
     <button id="btn-run" disabled title="Compile and run the file open in the editor">Run</button>
   </header>
 
@@ -773,6 +773,7 @@
           <button class="lib-btn" id="ws-new-folder" type="button">New folder</button>
           <button class="lib-btn secondary" id="ws-upload-btn" type="button">Upload…</button>
           <input type="file" id="ws-upload" multiple hidden>
+          <button class="lib-btn secondary" id="ws-export-zip" type="button">Export ZIP</button>
         </div>
         <div id="ws-status"></div>
         <div id="ws-tree"></div>
@@ -782,19 +783,22 @@
           mounted at <code>/workspace</code> on every compile, so
           <code>import sibling</code> and <code>import sub/mod</code> work.
           <strong>Run</strong> compiles the file open in the editor;
-          <strong>Build</strong> compiles <code>main.nim</code> into the Site folder.
+          <strong>Build</strong> compiles every <code>.nim</code> file into
+          its own <code>.wasm</code> in the Site folder.
+          <strong>Export ZIP</strong> downloads the whole folder.
         </p>
       </div>
 
       <!-- Site sub-tab: the deployed static webpage folder. Build writes
-           index.html + app.wasm + the runtime here; the app pane renders
-           this folder's index.html. -->
+           index.html (JS runtime inlined) + one .wasm per project .nim
+           file here; the app pane renders this folder's index.html. -->
       <div class="vfs-view" id="site-view" hidden>
         <div class="vfs-toolbar">
           <button class="lib-btn" id="site-open-tab" type="button">Open site in new tab</button>
           <button class="lib-btn secondary" id="site-refresh" type="button">Show in app pane</button>
           <button class="lib-btn secondary" id="site-upload-btn" type="button">Upload…</button>
           <input type="file" id="site-upload" multiple hidden>
+          <button class="lib-btn secondary" id="site-export-zip" type="button">Export ZIP</button>
           <button class="lib-btn secondary" id="site-clear" type="button">Clear…</button>
         </div>
         <div id="site-status"></div>
@@ -803,10 +807,23 @@
           This is the deployed static website — the working folder of the app
           pane, which renders this folder's <code>index.html</code>. Press
           <strong>Build</strong> to compile your project into it
-          (<code>app.wasm</code> + <code>index.html</code> + the runtime).
-          You can add your own files (CSS, images, …) — Build only overwrites
-          <code>app.wasm</code>, <code>nim-runtime/*</code> and a generated
-          <code>index.html</code>.
+          (one <code>.wasm</code> per <code>.nim</code> file +
+          <code>index.html</code> with the JS runtime inlined, minified;
+          the entry's wasm is the one <code>index.html</code> boots).
+          <strong>Export ZIP</strong> downloads
+          the whole folder. You can add your own files (CSS, images, …) —
+          Build only writes generated <code>.wasm</code> files and a
+          generated <code>index.html</code> (a hand-edited
+          <code>index.html</code> is kept, and only then does Build
+          write <code>nim-runtime/*</code> next to it — legacy mode),
+          and it removes stale <code>.wasm</code> files that no longer match
+          a project <code>.nim</code> source — an uploaded <code>.wasm</code>
+          matching no project module is removed on Build; non-wasm uploads
+          are never touched. Built <code>.wasm</code> files are obfuscated
+          (Nim name/producers sections stripped, decoy GCC comment injected),
+          and calling <code>bindDomain("example.com")</code> in your Nim code
+          makes the deployed site refuse to boot on any other domain —
+          deterrence against casual theft, not cryptographic security.
         </p>
       </div>
 
@@ -817,7 +834,7 @@
           <div class="lib-section-title">Add from a GitHub link</div>
           <div class="lib-row">
             <input type="text" id="lib-url" spellcheck="false"
-                   placeholder="https://github.com/PMunch/protobuf-nim">
+                   placeholder="https://github.com/nim-lang/checksums">
             <button class="lib-btn" id="lib-add" type="button">Add</button>
           </div>
           <div class="lib-section-title">…or upload a .zip of the library</div>
@@ -838,7 +855,7 @@
           Libraries are stored in your browser (IndexedDB) and mounted at
           <code>/libs/&lt;name&gt;</code> before every compile — adding or
           removing one takes effect on the next Run, no reload needed. After
-          adding protobuf-nim, for example, <code>import protobuf</code> just works.
+          adding nim-lang/checksums, for example, <code>import checksums/md5</code> just works.
         </p>
       </div>
     </section>

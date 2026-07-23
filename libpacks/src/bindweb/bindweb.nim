@@ -35,6 +35,10 @@ when defined(wasm):
   proc c_bindweb_event_buffer_capacity(): uint32 {.importc: "bindweb_event_buffer_capacity".}
   proc c_bindweb_scratch_buffer_ptr(): ptr uint8 {.importc: "bindweb_scratch_buffer_ptr".}
   proc c_bindweb_scratch_buffer_capacity(): uint32 {.importc: "bindweb_scratch_buffer_capacity".}
+
+  # Domain binding: C bridge to the JS domain guard
+  # (env.bindweb_js_domain_guard; returns 1 on match/dev mode, 0 on mismatch).
+  proc c_bindweb_check_domain(d: cstring, len: uint32): cint {.importc: "bindweb_check_domain".}
 else:
   # Native stub implementations for testing
   var g_scratch: array[4096, uint8]
@@ -86,6 +90,38 @@ proc pushString*(s: string) {.inline.} =
 proc pushStringView*(sv: StringView) {.inline.} =
   ## Push a StringView to the command buffer.
   bindweb_push_string(cast[cstring](sv.data), sv.len.csize_t)
+
+# ------------------------------------------------------------------------------
+# Domain binding
+# ------------------------------------------------------------------------------
+
+proc bindDomain*(domain: string) =
+  ## Bind this application to a hostname, e.g. `bindDomain("example.com")`.
+  ##
+  ## The domain is passed to the JS domain guard
+  ## (env.bindweb_js_domain_guard via the C bridge bindweb_check_domain),
+  ## which normalizes both sides (lowercase, no scheme/path/port, one
+  ## leading "www." stripped) and compares against location.hostname:
+  ##
+  ##   - in the IDE / dev preview (window.__BINDWEB_DOMAIN_ENFORCE__ falsy)
+  ##     the guard only warns once and always passes;
+  ##   - on a deployed site built after this call, the generated index.html
+  ##     sets the enforce flag and refuses to boot on any other hostname;
+  ##     a mismatch here additionally locks the page, reports through the
+  ##     usual echo/stdout channel and quits.
+  ##
+  ## Nim's style-insensitivity makes the snake_case alias `bind_domain`
+  ## work for free — both spellings call this same proc.
+  ##
+  ## Note: this is deterrence against casual theft, not cryptographic
+  ## security — a determined attacker can patch any client-side check.
+  when defined(wasm):
+    if c_bindweb_check_domain(domain.cstring, domain.len.uint32) == 0:
+      echo "bindweb: domain binding mismatch — this application is not available on this domain"
+      quit(1)
+  else:
+    # Native/stub build: nothing to check against, so this is a no-op.
+    discard domain
 
 # ------------------------------------------------------------------------------
 # Event polling

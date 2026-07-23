@@ -111,7 +111,7 @@ export function parseGitHubUrl(input) {
   try {
     url = new URL(String(input).trim());
   } catch (e) {
-    throw new Error('That does not look like a URL. Paste e.g. https://github.com/PMunch/protobuf-nim');
+    throw new Error('That does not look like a URL. Paste e.g. https://github.com/nim-lang/checksums');
   }
   if (!/^(www\.)?github\.com$/i.test(url.hostname)) {
     throw new Error('Only github.com links are supported (upload a .zip for anything else).');

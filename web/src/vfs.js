@@ -7,8 +7,9 @@
  *                                 .nim sources edited in the Code tab,
  *                                 mounted at /workspace on every compile)
  *     object store "site"       — the deployed static webpage folder
- *                                 (Build output: index.html + app.wasm +
- *                                 the runtime; the app pane renders it)
+ *                                 (Build output: index.html + one .wasm per
+ *                                 project .nim file + the runtime; the app
+ *                                 pane renders it)
  *
  * Record shape (keyPath "path"):
  *

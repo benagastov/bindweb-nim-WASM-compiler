@@ -3,3 +3,4 @@ web/vendor/
 dist/
 *.log
 .DS_Store
+toolchain/emsdk/

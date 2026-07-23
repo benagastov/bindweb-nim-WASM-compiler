@@ -13,6 +13,68 @@ export function createBindwebRunner(outputContainer) {
     let event_u8, event_i32, event_offset_view, EVENT_BUFFER_SIZE;
     let _updateFn = null, _updatePending = false, _eventAttached = false;
 
+    // -- Domain binding state (bindDomain / env.bindweb_js_domain_guard) --
+    // domainLocked: once a guard call mismatched, every later call stays
+    // locked. domainDevWarned: the dev-mode pass-through warns only once.
+    let domainLocked = false, domainDevWarned = false;
+
+    // Lowercase; strip scheme, path/query/fragment and port; strip one
+    // leading "www.". Applied to BOTH the bound domain and location.hostname
+    // so "https://www.Example.com:8080/x" and "example.com" compare equal.
+    function normalizeDomainName(h) {
+        return String(h == null ? '' : h).trim().toLowerCase()
+            .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+            .split(/[/?#]/)[0]
+            .split(':')[0]
+            .replace(/^www\./, '');
+    }
+
+    // Domain mismatch lockout: blank the app mount point and the console,
+    // then show a fake Flask-style server 404 — a bare document, no app
+    // chrome, no console reveal — so a thief sees a boring server error,
+    // not a protection mechanism. Identical wording to the boot gate in
+    // site-template.js (SITE_BOOT_JS). Sticky via domainLocked.
+    function lockOutForDomain() {
+        domainLocked = true;
+        const mount = elements[0];
+        if (mount && typeof mount.innerHTML === 'string') mount.innerHTML = '';
+        const consoleEl = (typeof document !== 'undefined') ? document.getElementById('nim-console') : null;
+        if (consoleEl) consoleEl.innerHTML = '';
+        if (mount && typeof document !== 'undefined') {
+            if (mount.style) mount.style.cssText = 'background:#fff;color:#000;font-family:serif;padding:8px;';
+            const h1 = document.createElement('h1');
+            h1.textContent = 'Not Found';
+            const p = document.createElement('p');
+            p.textContent = 'The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.';
+            mount.appendChild(h1);
+            mount.appendChild(p);
+        }
+    }
+
+    // env.bindweb_js_domain_guard(ptr, len): read the bound domain from wasm
+    // memory and compare it against location.hostname. Returns 1 to pass,
+    // 0 on mismatch (page already locked). Memory access follows the same
+    // pattern as the other env imports: a fresh Uint8Array view over
+    // memory.buffer on every call, so a grown memory is never read through
+    // a stale view.
+    function domainGuard(ptr, len) {
+        if (domainLocked) return 0;
+        if (!memory) { console.error('[bindweb] domain guard before connect'); return 0; }
+        const bound = normalizeDomainName(decoder.decode(new Uint8Array(memory.buffer, ptr, len)));
+        const host = normalizeDomainName((typeof location !== 'undefined' && location.hostname) || '');
+        // Dev mode (IDE Run / preview without a bound build): pass, warn once.
+        if (typeof window === 'undefined' || !window.__BINDWEB_DOMAIN_ENFORCE__) {
+            if (!domainDevWarned) {
+                domainDevWarned = true;
+                console.warn('[bindweb] domain binding is in dev mode (not enforced):', bound || '(empty)');
+            }
+            return 1;
+        }
+        if (bound === host) return 1;
+        lockOutForDomain();
+        return 0;
+    }
+
     const elements = []; elements[0] = outputContainer || document.body;
     const freeHandles = [];
     let nextHandle = 1;
@@ -54,6 +116,7 @@ export function createBindwebRunner(outputContainer) {
     // -- Import functions (env.*) called from WASM --
     const envImports = {
         bindweb_js_flush: (ptr, size) => { flush(ptr, size); },
+        bindweb_js_domain_guard: (ptr, len) => domainGuard(ptr, len),
         __cxa_atexit: () => 0, __cxa_thread_atexit: () => 0, __cxa_finalize: () => {},
 
         bindweb_dom_get_body: () => {

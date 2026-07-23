@@ -22,6 +22,7 @@
 
 import { createWasiShim, ProcExit } from './runtime/wasi-shim.js';
 import { runWasmApp } from './runtime/run-wasm.js';
+import { obfuscateWasm } from './wasm-obfuscate.js';
 
 /**
  * C prologue prepended to every Nim-generated TU.
@@ -229,8 +230,20 @@ export async function compileToWasm({ source, outFile, nim, clang, onLog = () =>
   }
   onLog(`clang: linked app.wasm (${link.wasm.length} bytes)`, 'ok');
 
+  // -- Step 3b: obfuscate (strip Nim fingerprints, keep it runnable) ------
+  // Applies to BOTH Run and Build: drops the "name"/"producers" custom
+  // sections (readable Nim symbols in DevTools, "language: Nim" toolchain
+  // metadata) and injects a decoy ".comment" GCC section. Sections that
+  // affect execution pass through byte-identical.
+  const obfuscated = obfuscateWasm(link.wasm);
+  onLog(
+    `obfuscate: stripped name/producers sections, decoy .comment injected ` +
+    `(${link.wasm.length} bytes -> ${obfuscated.length} bytes)`,
+    'info'
+  );
+
   result.ok = true;
-  result.wasm = link.wasm;
+  result.wasm = obfuscated;
   return result;
 }
 

@@ -32,8 +32,11 @@ import {
 } from './vfs.js';
 import {
   SITE_GENERATED_MARKER, RUNTIME_SITE_FILES, SITE_BOOT_JS,
-  stripEsmExports, rewriteSiteUrls, mimeFor, generateSiteIndex,
+  stripEsmExports, rewriteSiteUrls, disarmDomainGateForPreview, mimeFor,
+  generateSiteIndex, collectBoundDomains,
 } from './site-template.js';
+import { zipFiles } from './zip.js';
+import { installNimIDE } from './ai-api.js';
 
 /**
  * Dist-layout config: index.html sits at the dist root next to vendor/
@@ -353,6 +356,24 @@ function setStatus(text, kind = '') {
 }
 
 /**
+ * Log tap: listeners registered here receive every (msg, kind) pair that
+ * log() writes to the console pane. The window.NimIDE API (ai-api.js) uses
+ * it to capture a build's log lines without scraping the DOM.
+ *
+ * @type {Set<(msg: string, kind: string) => void>}
+ */
+const logListeners = new Set();
+
+/**
+ * Register a log listener; returns an unregister function. Listener
+ * exceptions are swallowed so a broken tap can never break the UI.
+ */
+function addLogListener(fn) {
+  logListeners.add(fn);
+  return () => logListeners.delete(fn);
+}
+
+/**
  * Append a line to the console pane.
  *
  * @param {string} msg message text
@@ -369,6 +390,9 @@ function log(msg, kind = 'info') {
   line.appendChild(document.createTextNode(msg));
   consoleEl.appendChild(line);
   consoleEl.scrollTop = consoleEl.scrollHeight;
+  for (const fn of logListeners) {
+    try { fn(msg, kind); } catch (e) { /* a broken tap must not break logging */ }
+  }
 }
 
 /** Show the friendly error box (SPEC §8c: never alert()). */
@@ -925,6 +949,7 @@ const wsNewFileBtn = document.getElementById('ws-new-file');
 const wsNewFolderBtn = document.getElementById('ws-new-folder');
 const wsUploadBtn = document.getElementById('ws-upload-btn');
 const wsUploadEl = document.getElementById('ws-upload');
+const wsExportZipBtn = document.getElementById('ws-export-zip');
 const siteTreeEl = document.getElementById('site-tree');
 const siteStatusEl = document.getElementById('site-status');
 const siteOpenTabBtn = document.getElementById('site-open-tab');
@@ -932,6 +957,7 @@ const siteRefreshBtn = document.getElementById('site-refresh');
 const siteClearBtn = document.getElementById('site-clear');
 const siteUploadBtn = document.getElementById('site-upload-btn');
 const siteUploadEl = document.getElementById('site-upload');
+const siteExportZipBtn = document.getElementById('site-export-zip');
 
 const textDecoder = new TextDecoder();
 
@@ -1351,7 +1377,11 @@ async function renderSite() {
     siteBlobUrls.push(url);
     urlMap.set(f.path, url);
   }
-  const html = rewriteSiteUrls(textDecoder.decode(index.data), urlMap);
+  // The preview runs on the IDE host — that is development mode, which is
+  // never domain-blocked: empty the embedded bound-domains list so the boot
+  // gate stays disarmed here. Real static hosting keeps enforcement (the
+  // index.html stored in the Site folder is untouched).
+  const html = disarmDomainGateForPreview(rewriteSiteUrls(textDecoder.decode(index.data), urlMap));
   outputEl.innerHTML = '';
   outputEl.classList.add('site-mode');
   const iframe = document.createElement('iframe');
@@ -1460,6 +1490,51 @@ siteUploadEl.addEventListener('change', async () => {
   renderSiteTree();
 });
 
+/* ----- Export ZIP: download a whole folder as one archive ------------------*/
+
+/**
+ * Zip up every file (and explicit folder, so empty folders survive) in one
+ * VFS area and offer it as a download. Shared by the Project and Site
+ * toolbar buttons.
+ *
+ * @param {string} area AREA_WORKSPACE | AREA_SITE
+ * @param {string} zipName download file name ("project.zip" / "site.zip")
+ * @param {HTMLElement} statusEl panel status line for feedback
+ */
+async function exportAreaZip(area, zipName, statusEl) {
+  try {
+    if (area === AREA_WORKSPACE) await saveOpenFile(); // export what's on screen
+    const [entries, files] = await Promise.all([listFiles(area), getFilesWithData(area)]);
+    if (entries.length === 0) {
+      vfsStatus(statusEl, 'Nothing to export yet — the folder is empty.', 'err');
+      log(`${zipName}: nothing to export yet`, 'info');
+      return;
+    }
+    const zipEntries = [
+      ...entries.filter((e) => e.isDir).map((e) => ({ name: e.path, isDir: true })),
+      ...files.map((f) => ({ name: f.path, data: f.data })),
+    ].sort((a, b) => a.name.localeCompare(b.name));
+    const bytes = zipFiles(zipEntries);
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = zipName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    const folderCount = entries.filter((e) => e.isDir).length;
+    const what = folderCount > 0 ? `${files.length} file(s), ${folderCount} folder(s)` : `${files.length} file(s)`;
+    const msg = `exported ${what} as ${zipName} (${fmtBytes(bytes.length)})`;
+    vfsStatus(statusEl, msg, 'ok');
+    log(`${zipName}: ${msg}`, 'ok');
+  } catch (e) {
+    vfsStatus(statusEl, `Export failed: ${e.message || e}`, 'err');
+    log(`${zipName}: export failed: ${e.message || e}`, 'error');
+  }
+}
+
+wsExportZipBtn.addEventListener('click', () => exportAreaZip(AREA_WORKSPACE, 'project.zip', wsStatusEl));
+siteExportZipBtn.addEventListener('click', () => exportAreaZip(AREA_SITE, 'site.zip', siteStatusEl));
+
 /* ----- Build: compile the project into the Site folder ---------------------*/
 
 /** Runtime modules fetched + stripped once per session, reused per Build. */
@@ -1560,6 +1635,14 @@ let nim = null;
 let clang = null;
 
 /**
+ * Resolves true the moment both toolchains finished loading (the same
+ * moment Run/Build get enabled), false if initialization failed. Drives
+ * window.NimIDE.ready().
+ */
+let resolveReady;
+const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
+
+/**
  * Map a pipeline result to a one-line plain-English summary plus the raw
  * compiler output for the collapsible details (SPEC §8c).
  *
@@ -1616,9 +1699,11 @@ async function init() {
     log('ready — press Run to build and run your program', 'ok');
     runBtn.disabled = false;
     buildBtn.disabled = false;
+    resolveReady(true);
   } catch (e) {
     setStatus('The compiler failed to load', 'err');
     log(`initialization failed: ${e.message || e}`, 'error');
+    resolveReady(false);
     showError(
       'The compiler could not be loaded. Check your internet connection and reload the page.',
       `initialization failed: ${e.message || e}\n\nexpected layout: ./vendor/nim/*, ./vendor/clang/*, ./libpacks/manifest.json next to index.html`
@@ -1680,25 +1765,55 @@ runBtn.addEventListener('click', async () => {
   }
 });
 
+/** Swap the .nim extension for .wasm, keeping the folder structure. */
+function wasmPathFor(nimPath) {
+  return nimPath.replace(/\.nim$/, '.wasm');
+}
+
 /**
- * Build: compile the project entry (main.nim, falling back to the open
- * file) into the deployed static webpage folder (Site tab), then show the
- * site in the app pane. app.wasm and nim-runtime/* are always refreshed;
- * index.html is regenerated only while it still carries the generated
- * marker, so hand edits survive the next Build.
+ * Build: compile EVERY .nim file in the Project tree into its own
+ * self-contained .wasm in the deployed static webpage folder (Site tab)
+ * — adios.nim -> adios.wasm, sub/mod.nim -> sub/mod.wasm. "Self-contained"
+ * is literal: compileToWasm statically links the Nim runtime, wasi-libc
+ * and the bindweb C runtime into each module, so every output wasm
+ * includes the runtime. The generated index.html boots the entry wasm
+ * (main.nim -> main.wasm, falling back to the .nim file open in the
+ * editor); the other modules sit next to it for the site's own code to
+ * load. A non-entry file that fails to compile is a warning, not a failed
+ * Build.
+ *
+ * Hygiene: index.html is regenerated only while it still carries the
+ * generated marker (hand edits survive) — a regenerated index.html gets
+ * the whole JS runtime inlined (minified), so a stale nim-runtime/ folder
+ * from older builds is deleted; a hand-edited index.html is kept and
+ * nim-runtime/* is refreshed for it, so legacy pages referencing
+ * nim-runtime/*.js keep working. Previously generated .wasm files whose
+ * .nim source disappeared (incl. a legacy app.wasm) are deleted —
+ * user-uploaded non-wasm assets are never touched.
+ *
+ * This is the EXACT flow the Build button runs; the button listener and
+ * the window.NimIDE API both go through runBuild() below, so the
+ * programmatic build is byte-for-byte the same pipeline with the same UI
+ * side effects. Returns a plain, JSON-serializable result object
+ * ({ok, summary, deployed, skipped, ...}) for the API; the button
+ * ignores it.
+ *
+ * @returns {Promise<{ok: boolean, summary: string, deployed: string[],
+ *   skipped: string[], indexRegenerated?: boolean, seconds?: string}>}
  */
-buildBtn.addEventListener('click', async () => {
-  buildBtn.disabled = true;
-  runBtn.disabled = true;
-  consoleEl.innerHTML = '';
-  hideError();
+async function performBuild() {
   const t0 = performance.now();
   try {
     await saveOpenFile();
+    const projectFiles = await getFilesWithData(AREA_WORKSPACE);
+    const nimFiles = projectFiles.filter((f) => f.path.endsWith('.nim'));
+    const nimPaths = new Set(nimFiles.map((f) => f.path));
+
+    // Entry selection: main.nim at the root, else the .nim file open in
+    // the editor, else the current error dialog (unchanged behavior).
     let entry = 'main.nim';
-    const entryData = await readFile(AREA_WORKSPACE, 'main.nim').catch(() => null);
-    if (!entryData) {
-      if (openPath && openPath.endsWith('.nim')) {
+    if (!nimPaths.has(entry)) {
+      if (openPath && openPath.endsWith('.nim') && nimPaths.has(openPath)) {
         entry = openPath;
       } else {
         showError(
@@ -1706,58 +1821,185 @@ buildBtn.addEventListener('click', async () => {
           'Build compiles the project entry file "main.nim" (or the .nim file open in the editor). ' +
           'Create one in the Project tab, then press Build again.'
         );
-        return;
+        return { ok: false, summary: 'Nothing to build yet.', deployed: [], skipped: [] };
       }
     }
-    const source = entry === openPath ? editor.value : textDecoder.decode(entryData);
-    log(`build: compiling project entry "${entry}"`, 'step');
-    const result = await compileToWasm({
-      source,
-      outFile: `/workspace/${entry}`,
-      nim,
-      clang,
-      onLog: (msg, kind) => {
-        log(msg, kind);
-        if (kind === 'step') narrateStep(msg);
-      },
-    });
-    if (!result.ok) {
-      const { summary, raw } = friendlyError(result);
-      setStatus('Build failed — see the message below', 'err');
-      showError(summary, raw);
-      log(summary, 'error');
-      return;
+
+    // Compile the entry first (its failure fails the Build), then the rest
+    // in path order. Sequential: one compiler instance, one MEMFS.
+    const queue = [entry, ...nimFiles.map((f) => f.path).filter((p) => p !== entry).sort()];
+    const dataByPath = new Map(nimFiles.map((f) => [f.path, f.data]));
+    const deployed = []; // site-relative wasm paths, entry first
+    const skipped = []; // non-entry files that failed to compile
+    for (let i = 0; i < queue.length; i++) {
+      const path = queue[i];
+      log(`build: [${i + 1}/${queue.length}] compiling ${path}`, 'step');
+      const result = await compileToWasm({ // eslint-disable-line no-await-in-loop
+        source: path === openPath ? editor.value : textDecoder.decode(dataByPath.get(path)),
+        outFile: `/workspace/${path}`,
+        nim,
+        clang,
+        onLog: (msg, kind) => {
+          log(msg, kind);
+          if (kind === 'step') narrateStep(msg);
+        },
+      });
+      if (!result.ok) {
+        if (path === entry) {
+          const { summary, raw } = friendlyError(result);
+          setStatus('Build failed — see the message below', 'err');
+          showError(summary, raw);
+          log(summary, 'error');
+          return { ok: false, summary, deployed: [], skipped };
+        }
+        const { summary } = friendlyError(result);
+        // Don't ship a stale wasm for a file that no longer compiles.
+        const staleWasm = wasmPathFor(path);
+        const removed = await deletePath(AREA_SITE, staleWasm); // eslint-disable-line no-await-in-loop
+        log(`build: warning: ${path} failed to compile and was skipped — ${summary}`, 'warn');
+        if (removed) log(`build: removed stale ${staleWasm} left over from a previous build`, 'info');
+        skipped.push(removed ? `${path} (stale wasm removed)` : path);
+        continue;
+      }
+      const wasmPath = wasmPathFor(path);
+      await writeFile(AREA_SITE, wasmPath, result.wasm); // eslint-disable-line no-await-in-loop
+      deployed.push(wasmPath);
     }
 
     setStatus('Deploying to the Site folder…', 'busy');
-    await writeFile(AREA_SITE, 'app.wasm', result.wasm);
     const runtime = await loadRuntimeForSite();
-    for (const [dest, text] of runtime) {
-      await writeFile(AREA_SITE, dest, text);
+
+    // Domain binding (bindDomain("...")): scan ALL project .nim sources for
+    // bound hostnames. The generated index.html embeds them (normalized,
+    // unique) plus the wasm manifest (entry first, rest sorted — exactly
+    // the `deployed` order) so the boot script can abort on a foreign
+    // domain BEFORE any fetch and load the manifest strictly one-by-one.
+    const boundDomains = collectBoundDomains(
+      nimFiles.map((f) => (f.path === openPath ? editor.value : textDecoder.decode(f.data)))
+    );
+    const wasmManifest = deployed.slice();
+    if (boundDomains.length) {
+      log(`build: domain binding active for ${boundDomains.join(', ')} — the deployed site will only boot there`, 'info');
     }
-    await writeFile(AREA_SITE, 'nim-runtime/boot.js', SITE_BOOT_JS);
+
     const existingIndex = await readFile(AREA_SITE, 'index.html').catch(() => null);
     const existingText = existingIndex ? textDecoder.decode(existingIndex) : null;
+    let indexRegenerated = false;
     if (!existingText || existingText.includes(SITE_GENERATED_MARKER)) {
-      await writeFile(AREA_SITE, 'index.html', generateSiteIndex(entry));
-      log('build: index.html generated', 'info');
+      // Generated site = wasm files + index.html with the runtime inlined
+      // (minified); no nim-runtime/ folder. Remove a stale one left by
+      // older builds (or by a previously hand-edited index.html).
+      const removedRuntime = await deletePath(AREA_SITE, 'nim-runtime');
+      if (removedRuntime) {
+        log('build: removed the old nim-runtime/ folder — the runtime is now inlined into index.html', 'info');
+      }
+      const runtimeScripts = [
+        ...RUNTIME_SITE_FILES.map((f) => ({
+          name: f.dest.slice('nim-runtime/'.length),
+          code: runtime.get(f.dest),
+        })),
+        { name: 'boot.js', code: SITE_BOOT_JS },
+      ];
+      await writeFile(AREA_SITE, 'index.html',
+        generateSiteIndex(entry, wasmPathFor(entry), runtimeScripts, { boundDomains, wasmManifest }));
+      indexRegenerated = true;
+      log(`build: index.html generated (boots ${wasmPathFor(entry)}; runtime inlined as an obfuscated payload)`, 'info');
     } else {
-      log('build: keeping your hand-edited index.html (not regenerated)', 'info');
+      // Legacy mode: a hand-edited index.html may still reference
+      // nim-runtime/*.js, so keep those files fresh alongside it.
+      for (const [dest, text] of runtime) {
+        await writeFile(AREA_SITE, dest, text); // eslint-disable-line no-await-in-loop
+      }
+      await writeFile(AREA_SITE, 'nim-runtime/boot.js', SITE_BOOT_JS);
+      log('build: keeping your hand-edited index.html (not regenerated) — refreshed nim-runtime/* so its <script src="nim-runtime/..."> references keep working', 'info');
+    }
+
+    // Stale-output hygiene: delete site .wasm files whose matching .nim
+    // source is gone (covers a legacy app.wasm too). Only .wasm files are
+    // candidates, so user uploads are never deleted.
+    const siteEntries = await listFiles(AREA_SITE).catch(() => []);
+    for (const rec of siteEntries) {
+      if (rec.isDir || !rec.path.endsWith('.wasm')) continue;
+      const nimSource = rec.path.replace(/\.wasm$/, '.nim');
+      if (!nimPaths.has(nimSource)) {
+        await deletePath(AREA_SITE, rec.path); // eslint-disable-line no-await-in-loop
+        log(`build: removed stale ${rec.path} (no matching .nim in the project)`, 'info');
+      }
     }
 
     await renderSite();
     renderSiteTree();
     const dt = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`Site deployed — built in ${dt}s`, 'ok');
-    log(`build: deployed ${entry} -> Site folder (app.wasm ${result.wasm.length} bytes + index.html + nim-runtime/) — the app pane shows the site`, 'ok');
+    let line = `build: deployed ${deployed.length} wasm module(s) (${deployed.join(', ')}) + index.html`;
+    line += indexRegenerated ? ' (runtime inlined)' : ' + nim-runtime/';
+    if (skipped.length) line += ` — skipped ${skipped.length} file(s) that failed to compile (${skipped.join(', ')})`;
+    log(line, skipped.length ? 'warn' : 'ok');
+    return { ok: true, summary: line, deployed, skipped, indexRegenerated, seconds: dt };
   } catch (e) {
     setStatus('Build failed — see the message below', 'err');
     showError('The build stopped unexpectedly. Details below.', e.stack || String(e));
     log(`build error: ${e.message || e}`, 'error');
+    return { ok: false, summary: `build error: ${e.message || e}`, deployed: [], skipped: [] };
+  }
+}
+
+/**
+ * One-build-at-a-time guard shared by the Build button and the
+ * window.NimIDE API: while a build is in flight (from either path) the
+ * Build/Run buttons stay disabled and a second build request is refused.
+ * Clears the console pane and hides the error box, exactly like the
+ * button always did.
+ *
+ * @returns {Promise<object>} performBuild()'s plain result object
+ */
+let buildInFlight = false;
+async function runBuild() {
+  if (buildInFlight) {
+    const summary = 'a build is already running — wait for it to finish';
+    log(`build: ${summary}`, 'warn');
+    return { ok: false, summary, deployed: [], skipped: [] };
+  }
+  buildInFlight = true;
+  buildBtn.disabled = true;
+  runBtn.disabled = true;
+  consoleEl.innerHTML = '';
+  hideError();
+  try {
+    return await performBuild();
   } finally {
     buildBtn.disabled = false;
     runBtn.disabled = false;
+    buildInFlight = false;
   }
+}
+
+buildBtn.addEventListener('click', () => { runBuild(); });
+
+/* --------------------------------------------------------------------------
+ * window.NimIDE — GUI-less driving API (ai-api.js), for AI/CLI agents
+ * driving this page via the DevTools console / CDP Runtime.evaluate /
+ * Playwright. Everything below is hooks into the pieces above; the API
+ * itself lives in ai-api.js and is documented in AI.md / SKILL.md.
+ * ------------------------------------------------------------------------ */
+
+installNimIDE({
+  version: '1.0.0',
+  ready: () => readyPromise,
+  status: () => statusEl.textContent,
+  runBuild,
+  addLogListener,
+  saveOpenFile,
+  // An API write over the file open in the editor must land in the editor
+  // too — otherwise the next auto-save / build would clobber it with the
+  // stale editor contents.
+  syncEditor: (path, text) => {
+    if (openPath === path && typeof text === 'string') {
+      editor.value = text;
+      updateLineNumbers();
+    }
+  },
+  refreshTrees: () => { renderWorkspaceTree(); renderSiteTree(); },
 });
 
 /* --------------------------------------------------------------------------
