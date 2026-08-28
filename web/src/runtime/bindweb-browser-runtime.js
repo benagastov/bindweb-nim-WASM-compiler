@@ -113,6 +113,33 @@ export function createBindwebRunner(outputContainer) {
     // first time a keydown/mousedown fired after init.
     function _triggerDiscreteUpdate() { _triggerUpdate(); }
 
+
+    // Rich direct-canvas editors can opt into a Unicode-aware keyboard stream
+    // with data-bindweb-direct-editor="true". QNote's historical
+    // #qnote-canvas id remains supported for compatibility.
+    function findDirectCanvasEditor() {
+        return document.querySelector('[data-bindweb-direct-editor="true"]')
+            || document.getElementById('qnote-canvas');
+    }
+
+    // Preserve the existing int32 event ABI while carrying Unicode characters,
+    // navigation/editing keys, and modifier state to Nim.
+    function packDirectEditorKey(e) {
+        const special = {
+            Backspace: 0x110001, Delete: 0x110002, Enter: 0x110003,
+            Tab: 0x110004, ArrowLeft: 0x110005, ArrowRight: 0x110006,
+            ArrowUp: 0x110007, ArrowDown: 0x110008, Home: 0x110009,
+            End: 0x11000a, Escape: 0x11000b
+        };
+        let code = special[e.key] || (e.key && [...e.key].length === 1
+            ? e.key.codePointAt(0) : 0);
+        if (e.ctrlKey) code |= 0x200000;
+        if (e.shiftKey) code |= 0x400000;
+        if (e.altKey) code |= 0x800000;
+        if (e.metaKey) code |= 0x1000000;
+        return code | 0;
+    }
+
     // -- Import functions (env.*) called from WASM --
     const envImports = {
         bindweb_js_flush: (ptr, size) => { flush(ptr, size); },
@@ -1533,14 +1560,56 @@ export function createBindwebRunner(outputContainer) {
                 }
 
                 case 83: {
-                    window.addEventListener('keydown', e => { push_event_input_KEY_DOWN(e.keyCode); _triggerDiscreteUpdate(); }); window.addEventListener('keyup', e => { push_event_input_KEY_UP(e.keyCode); _triggerDiscreteUpdate(); });
+                    const editor = findDirectCanvasEditor();
+                    if (editor && !editor.dataset.bindwebKeyboard) {
+                        editor.dataset.bindwebKeyboard = '1';
+                        editor.tabIndex = editor.tabIndex >= 0 ? editor.tabIndex : 0;
+                        editor.setAttribute('role', editor.getAttribute('role') || 'textbox');
+                        editor.setAttribute('aria-multiline', 'true');
+                        editor.addEventListener('keydown', e => {
+                            const packed = packDirectEditorKey(e);
+                            if (!packed) return;
+                            e.preventDefault();
+                            push_event_input_KEY_DOWN(packed);
+                            _triggerDiscreteUpdate();
+                        });
+                        editor.addEventListener('keyup', e => {
+                            const packed = packDirectEditorKey(e);
+                            if (!packed) return;
+                            push_event_input_KEY_UP(packed);
+                            _triggerDiscreteUpdate();
+                        });
+                        editor.addEventListener('paste', e => {
+                            const text = e.clipboardData && e.clipboardData.getData('text/plain');
+                            if (!text) return;
+                            e.preventDefault();
+                            for (const ch of text) push_event_input_KEY_DOWN(ch.codePointAt(0));
+                            _triggerDiscreteUpdate();
+                        });
+                        const preserveFocus = document.querySelector(
+                            '[data-bindweb-preserve-editor-focus], #toolbar-container'
+                        );
+                        preserveFocus?.addEventListener('mousedown', e => {
+                            if (e.target.closest('button')) e.preventDefault();
+                        });
+                    } else if (!editor) {
+                        // Existing behavior for applications that do not opt in.
+                        window.addEventListener('keydown', e => {
+                            push_event_input_KEY_DOWN(e.keyCode);
+                            _triggerDiscreteUpdate();
+                        });
+                        window.addEventListener('keyup', e => {
+                            push_event_input_KEY_UP(e.keyCode);
+                            _triggerDiscreteUpdate();
+                        });
+                    }
                     break;
                 }
 
                 case 84: {
                     if (pos + 4 > end) break;
                     const handle = i32[pos >> 2]; pos += 4;
-                    const el = elements[handle] || document; el.addEventListener('mousedown', e => { push_event_input_MOUSE_DOWN(e.button, e.offsetX, e.offsetY); _triggerDiscreteUpdate(); }); el.addEventListener('mouseup', e => { push_event_input_MOUSE_UP(e.button, e.offsetX, e.offsetY); _triggerDiscreteUpdate(); }); el.addEventListener('mousemove', e => push_event_input_MOUSE_MOVE(e.offsetX, e.offsetY));
+                    const el = elements[handle] || document; el.addEventListener('mousedown', e => { if (el.focus) el.focus({ preventScroll: true }); push_event_input_MOUSE_DOWN(e.button, e.offsetX, e.offsetY); _triggerDiscreteUpdate(); }); el.addEventListener('mouseup', e => { push_event_input_MOUSE_UP(e.button, e.offsetX, e.offsetY); _triggerDiscreteUpdate(); }); el.addEventListener('mousemove', e => push_event_input_MOUSE_MOVE(e.offsetX, e.offsetY));
                     break;
                 }
 
