@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Git Bash can resolve Windows' non-functional Microsoft Store python3 alias
+# before the installed `python.exe`. Forward explicitly to the working Python.
+exec python "$@"

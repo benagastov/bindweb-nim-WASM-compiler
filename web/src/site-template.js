@@ -394,10 +394,12 @@ export function generateSiteIndex(title, wasmPath = 'app.wasm', runtimeScripts =
         'the .wasm side or split it (e.g. "<" + "/script").'
       );
     }
-    parts.push(`/* ${name} — inlined (minified) by Nim Playground Build */\n${minifyInlineRuntime(code)}`);
+    parts.push(opts.javascript ? code : minifyInlineRuntime(code));
   }
   const payloadScript = parts.length
-    ? runtimePayloadScript(encodeRuntimePayload(parts.join('\n')))
+    ? (opts.javascript && opts.javascript !== 'obfuscate'
+      ? `<script>${parts.join('\n')}</script>`
+      : runtimePayloadScript(encodeRuntimePayload(parts.join('\n'))))
     : '';
   // Domain-binding / load-order globals for the boot script's pre-fetch
   // gate. JSON.stringify keeps the values safely quoted; the in-IDE site

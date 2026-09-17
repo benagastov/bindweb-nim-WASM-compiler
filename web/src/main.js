@@ -1801,7 +1801,9 @@ function wasmPathFor(nimPath) {
  * @returns {Promise<{ok: boolean, summary: string, deployed: string[],
  *   skipped: string[], indexRegenerated?: boolean, seconds?: string}>}
  */
-async function performBuild() {
+async function performBuild(options = {}) {
+  const { protectJavaScript, javascriptMode } = await import('./javascript-protection.mjs');
+  const javascript = javascriptMode(options.javascript);
   const t0 = performance.now();
   try {
     await saveOpenFile();
@@ -1827,7 +1829,9 @@ async function performBuild() {
 
     // Compile the entry first (its failure fails the Build), then the rest
     // in path order. Sequential: one compiler instance, one MEMFS.
-    const queue = [entry, ...nimFiles.map((f) => f.path).filter((p) => p !== entry).sort()];
+    const queue = options.entryOnly
+      ? [entry]
+      : [entry, ...nimFiles.map((f) => f.path).filter((p) => p !== entry).sort()];
     const dataByPath = new Map(nimFiles.map((f) => [f.path, f.data]));
     const deployed = []; // site-relative wasm paths, entry first
     const skipped = []; // non-entry files that failed to compile
@@ -1900,15 +1904,18 @@ async function performBuild() {
         })),
         { name: 'boot.js', code: SITE_BOOT_JS },
       ];
+      for (const script of runtimeScripts)
+        script.code = await protectJavaScript(script.code, { mode: javascript });
       await writeFile(AREA_SITE, 'index.html',
-        generateSiteIndex(entry, wasmPathFor(entry), runtimeScripts, { boundDomains, wasmManifest }));
+        generateSiteIndex(entry, wasmPathFor(entry), runtimeScripts, { boundDomains, wasmManifest, javascript }));
       indexRegenerated = true;
       log(`build: index.html generated (boots ${wasmPathFor(entry)}; runtime inlined as an obfuscated payload)`, 'info');
     } else {
       // Legacy mode: a hand-edited index.html may still reference
       // nim-runtime/*.js, so keep those files fresh alongside it.
       for (const [dest, text] of runtime) {
-        await writeFile(AREA_SITE, dest, text); // eslint-disable-line no-await-in-loop
+        await writeFile(AREA_SITE, dest, dest.endsWith('.js')
+          ? await protectJavaScript(text, { mode: javascript }) : text);
       }
       await writeFile(AREA_SITE, 'nim-runtime/boot.js', SITE_BOOT_JS);
       log('build: keeping your hand-edited index.html (not regenerated) — refreshed nim-runtime/* so its <script src="nim-runtime/..."> references keep working', 'info');
@@ -1954,7 +1961,7 @@ async function performBuild() {
  * @returns {Promise<object>} performBuild()'s plain result object
  */
 let buildInFlight = false;
-async function runBuild() {
+async function runBuild(options = {}) {
   if (buildInFlight) {
     const summary = 'a build is already running — wait for it to finish';
     log(`build: ${summary}`, 'warn');
@@ -1966,7 +1973,7 @@ async function runBuild() {
   consoleEl.innerHTML = '';
   hideError();
   try {
-    return await performBuild();
+    return await performBuild(options);
   } finally {
     buildBtn.disabled = false;
     runBtn.disabled = false;

@@ -116,6 +116,26 @@ Runtime.evaluate({
 
 ## Pitfalls
 
+### Release JavaScript options
+
+`await NimIDE.build({javascript: 'obfuscate'})` and
+`await NimIDE.buildEntry({javascript: 'obfuscate'})` default to parser-based
+minification plus randomized local-identifier mangling (vendored Terser 5.47.1).
+Use `'minify'` to retain identifiers, or `'none'` to retain readable JS.
+These options transform generated runtime scripts and runtime files refreshed
+alongside custom HTML; they do not rewrite arbitrary user site scripts.
+`await NimIDE.protectJavaScript(source, {mode: 'obfuscate'})` returns
+`{code, mode, sourceMap: false}` for custom release packagers.
+Global names and properties stay intact by default for cross-file/WASM compatibility.
+For a complete bundle, `protectJavaScript` also accepts `toplevel: true` and
+`reserved: ['publicName']`; this randomizes private top-level function/constant
+bindings too. Bundle dependent scripts together before using that option.
+Serialized worker closures must be compiled independently before page mangling.
+Generated obfuscate-mode HTML also retains its existing reversible payload
+wrapper; QNote packaging uses direct scripts and keeps its no-JS-eval CSP.
+This raises inspection effort, not a confidentiality or injection boundary.
+WASM debug metadata stripping does not hide executable code or embedded data.
+
 - **One build at a time.** A second `build()` while one is in flight (from
   either the API or the Build button) is refused with
   `ok: false, summary: "a build is already running…"`. The Run/Build

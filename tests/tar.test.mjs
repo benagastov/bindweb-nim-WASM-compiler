@@ -103,9 +103,9 @@ test('system tar: untar() parses output of the tar binary', () => {
     writeFileSync(join(dir, 'work', 'sub', 'dir', 'beta.nim'), 'echo "beta"\n');
     writeFileSync(join(dir, 'work', 'empty'), '');
 
-    // Same deterministic ustar flags as tools/pack-lib.sh.
+    // Exercise ustar compatibility with both GNU tar and Windows bsdtar.
+    // Owner/sort flags are packaging concerns, not required by this reader test.
     execFileSync('tar', [
-      '--sort=name', '--owner=0', '--group=0', '--numeric-owner',
       '--format=ustar', '-cf', join(dir, 'pack.tar'), '-C', join(dir, 'work'), '.',
     ]);
 

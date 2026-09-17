@@ -10,6 +10,13 @@ copy-paste-oriented version of this document is `SKILL.md`.
 
 ## Architecture recap
 
+Release binaries now strip names, producers and debug/source-map metadata
+without injecting a fake compiler signature. This is not encryption.
+`await NimIDE.protectWasm(base64)` provides the same pure transformation for an
+existing module and returns `{base64, bytes, protection, encrypted: false}`;
+it does not write project/site files. The historical XOR-encoded generated
+JavaScript payload described below is separate and is not a secrecy boundary.
+
 - **Two virtual folders in IndexedDB** (`web/src/vfs.js`): the *Project*
   folder is the Nim working folder the editor edits and the compiler
   mounts at `/workspace`; the *Site* folder is the deployed static webpage

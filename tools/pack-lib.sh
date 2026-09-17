@@ -197,9 +197,14 @@ JS
 
 TAR_BASENAME="$NAME.tar"
 if command -v python3 >/dev/null 2>&1; then
-  python3 "$PY_EDIT" "$MANIFEST" "$NAME" "$TAR_BASENAME" "$MOUNT" "$REQUIRED"
+  # Git Bash rewrites POSIX-looking arguments passed to native Windows
+  # programs. The mount is a path inside the browser's MEMFS and must retain
+  # its leading slash; continue converting the real host paths normally.
+  MSYS2_ARG_CONV_EXCL="$MOUNT" \
+    python3 "$PY_EDIT" "$MANIFEST" "$NAME" "$TAR_BASENAME" "$MOUNT" "$REQUIRED"
 elif command -v node >/dev/null 2>&1; then
-  node "$JS_EDIT" "$MANIFEST" "$NAME" "$TAR_BASENAME" "$MOUNT" "$REQUIRED"
+  MSYS2_ARG_CONV_EXCL="$MOUNT" \
+    node "$JS_EDIT" "$MANIFEST" "$NAME" "$TAR_BASENAME" "$MOUNT" "$REQUIRED"
 else
   die "neither python3 nor node found; cannot edit manifest.json"
 fi

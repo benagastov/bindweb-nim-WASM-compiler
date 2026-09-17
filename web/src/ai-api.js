@@ -22,6 +22,8 @@ import {
   getFilesWithData, isLikelyBinary,
 } from './vfs.js';
 import { zipFiles } from './zip.js';
+import { protectWasm } from './wasm-obfuscate.js';
+import { javascriptMode, protectJavaScript } from './javascript-protection.mjs';
 
 const textDecoder = new TextDecoder();
 
@@ -88,6 +90,15 @@ export function installNimIDE(hooks) {
 
   const api = {
     version: String(hooks.version || '1.0.0'),
+
+    /** Pure binary transformation; does not overwrite a project/site file. */
+    async protectWasm(base64) {
+      const bytes = base64ToBytes(base64);
+      if (!WebAssembly.validate(bytes)) throw new Error('Invalid WebAssembly module');
+      const protectedBytes = protectWasm(bytes);
+      return { base64: bytesToBase64(protectedBytes), bytes: protectedBytes.length,
+        protection: 'debug-metadata-stripped', encrypted: false };
+    },
 
     /** Resolves true once the toolchains are loaded and Build works. */
     ready: () => hooks.ready(),
@@ -185,14 +196,50 @@ export function installNimIDE(hooks) {
      *   skipped: non-entry .nim files that failed to compile;
      *   siteFiles: every file path in the Site folder after the build.
      */
-    async build() {
+    async protectJavaScript(source, options = {}) {
+      if (typeof source !== 'string') throw new TypeError('source must be JavaScript text');
+      return { code: await protectJavaScript(source, options), mode: javascriptMode(options.mode), sourceMap: false };
+    },
+
+    async build(options = {}) {
+      const javascript = javascriptMode(options.javascript);
       const logs = [];
       const untap = hooks.addLogListener((msg, kind) => {
         logs.push(kind === 'info' ? msg : `[${kind}] ${msg}`);
       });
       let result;
       try {
-        result = await hooks.runBuild();
+        result = await hooks.runBuild({ javascript });
+      } finally {
+        untap();
+      }
+      const siteEntries = await vfsListFiles(AREA_SITE).catch(() => []);
+      return {
+        ok: !!result.ok,
+        summary: String(result.summary || ''),
+        logs,
+        deployed: Array.isArray(result.deployed) ? result.deployed.slice() : [],
+        skipped: Array.isArray(result.skipped) ? result.skipped.slice() : [],
+        siteFiles: siteEntries.filter((e) => !e.isDir).map((e) => e.path),
+      };
+    },
+
+    /**
+     * Compile and package only the project entry. Imported Nim modules are
+     * already linked into that self-contained WASM; this avoids compiling
+     * every helper again as an unrelated standalone app during automated
+     * edit/test loops. The normal Build button and build() retain the full
+     * all-module behavior.
+     */
+    async buildEntry(options = {}) {
+      const javascript = javascriptMode(options.javascript);
+      const logs = [];
+      const untap = hooks.addLogListener((msg, kind) => {
+        logs.push(kind === 'info' ? msg : `[${kind}] ${msg}`);
+      });
+      let result;
+      try {
+        result = await hooks.runBuild({ entryOnly: true, javascript });
       } finally {
         untap();
       }

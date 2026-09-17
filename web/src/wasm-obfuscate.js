@@ -83,7 +83,7 @@ function writeU32Leb(value) {
  * @returns {Uint8Array} the obfuscated module (same imports/exports/code)
  * @throws {Error} on malformed input (bad magic/version, bad LEB, truncation)
  */
-export function obfuscateWasm(bytes) {
+export function obfuscateWasm(bytes, { decoy = true, stripDebug = false } = {}) {
   if (!(bytes instanceof Uint8Array)) {
     throw new Error('wasm-obfuscate: expected a Uint8Array');
   }
@@ -124,7 +124,9 @@ export function obfuscateWasm(bytes) {
         );
       }
       const name = textDecoder.decode(bytes.subarray(nameStart, nameStart + nameLen));
-      drop = DROP_SECTION_NAMES.has(name);
+      drop = DROP_SECTION_NAMES.has(name) || (stripDebug &&
+        (name.startsWith('.debug_') || name.startsWith('.zdebug_') ||
+         name === 'sourceMappingURL' || name === 'external_debug_info' || name === '.comment'));
     }
 
     if (!drop) {
@@ -136,6 +138,7 @@ export function obfuscateWasm(bytes) {
 
   // Decoy ".comment" custom section: id 0, payload = LEB(nameLen) + name +
   // raw payload bytes. Custom sections may sit anywhere; appended last.
+  if (decoy) {
   const decoyName = textEncoder.encode(DECOY_SECTION_NAME);
   const decoyPayload = textEncoder.encode(DECOY_SECTION_PAYLOAD);
   const decoyBodyLen = writeU32Leb(decoyName.length).length + decoyName.length + decoyPayload.length;
@@ -144,6 +147,7 @@ export function obfuscateWasm(bytes) {
   chunks.push(writeU32Leb(decoyName.length));
   chunks.push(decoyName);
   chunks.push(decoyPayload);
+  }
 
   const total = chunks.reduce((acc, c) => acc + c.length, 0);
   const out = new Uint8Array(total);
@@ -156,3 +160,11 @@ export function obfuscateWasm(bytes) {
 }
 
 export default obfuscateWasm;
+
+/** Release metadata removal, not encryption or an access-control mechanism.
+ * Does not invent a compiler identity. Executable sections stay identical.
+ * Keep debug builds separately if readable production trap stacks are needed.
+ */
+export function protectWasm(bytes) {
+  return obfuscateWasm(bytes, { decoy: false, stripDebug: true });
+}

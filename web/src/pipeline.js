@@ -235,9 +235,9 @@ export async function compileToWasm({ source, outFile, nim, clang, onLog = () =>
   // sections (readable Nim symbols in DevTools, "language: Nim" toolchain
   // metadata) and injects a decoy ".comment" GCC section. Sections that
   // affect execution pass through byte-identical.
-  const obfuscated = obfuscateWasm(link.wasm);
+  const obfuscated = obfuscateWasm(link.wasm, { decoy: false, stripDebug: true });
   onLog(
-    `obfuscate: stripped name/producers sections, decoy .comment injected ` +
+    `release: stripped names, producers and debug metadata (not encryption) ` +
     `(${link.wasm.length} bytes -> ${obfuscated.length} bytes)`,
     'info'
   );

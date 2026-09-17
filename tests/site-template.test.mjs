@@ -120,12 +120,12 @@ await test('generateSiteIndex emits one obfuscated payload after the plaintext w
   assert.ok(!html.includes('runWasmApp();'), 'boot source not readable in view-source');
 
   // Decode the payload: the four runtime scripts are concatenated in
-  // execution order, each behind its minified-inline banner.
+  // execution order, without relying on stripped build comments.
   const { source } = decodePayloadFrom(html);
-  const names = ['wasi-shim.js', 'bindweb-runtime.js', 'run-wasm.js', 'boot.js'];
+  const names = ['function createWasiShim', 'function createBindwebRunner', 'async function runWasmApp', 'runWasmApp();'];
   let prev = -1;
   for (const name of names) {
-    const idx = source.indexOf(`/* ${name} — inlined (minified) by Nim Playground Build */`);
+    const idx = source.indexOf(name);
     assert.ok(idx !== -1, `payload segment for ${name} present`);
     assert.ok(idx > prev, `${name} comes after the previous segment`);
     prev = idx;

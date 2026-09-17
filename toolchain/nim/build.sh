@@ -50,7 +50,27 @@ fi
 
 # --- Stage 1: bootstrap native Nim ------------------------------------------
 SRC="$WORK/Nim"
-if [[ ! -x "$SRC/bin/nim" ]]; then
+HOST_NIM=""
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    candidate="$(command -v nim 2>/dev/null || true)"
+    if [[ -n "$candidate" ]] && "$candidate" --version 2>/dev/null | head -1 | grep -q "Version $NIM_VERSION"; then
+      HOST_NIM="$candidate"
+    fi
+    ;;
+esac
+
+if [[ -n "$HOST_NIM" ]]; then
+  say "[1/4] using installed Nim $NIM_VERSION host compiler (Windows-safe path)"
+  if [[ ! -d "$SRC/.git" ]]; then
+    git clone "$NIM_REPO" "$SRC"
+  fi
+  git -C "$SRC" checkout "$NIM_REF"
+  if [[ ! -d "$SRC/dist/checksums/.git" ]]; then
+    git clone "$NIM_CHECKSUMS_REPO" "$SRC/dist/checksums"
+  fi
+  NIM_DRIVER="$HOST_NIM"
+elif [[ ! -x "$SRC/bin/nim" ]]; then
   say "[1/4] bootstrapping Nim $NIM_VERSION from source"
   git clone "$NIM_REPO" "$SRC"
   git -C "$SRC" checkout "$NIM_REF"
@@ -60,11 +80,13 @@ if [[ ! -x "$SRC/bin/nim" ]]; then
   # one-pass boot to the pinned 2.0 compiler
   ( cd "$SRC" && ./bin/nim c -d:release -d:nimcore --lib:lib --noNimblePath \
         --path:dist/checksums/src --hints:off -o:bin/nim compiler/nim.nim )
+  NIM_DRIVER="$SRC/bin/nim"
 else
   say "[1/4] native Nim present"
+  NIM_DRIVER="$SRC/bin/nim"
 fi
-export PATH="$SRC/bin:$PATH"
-nim --version | head -1
+export PATH="$(dirname "$NIM_DRIVER"):$PATH"
+"$NIM_DRIVER" --version | head -1
 
 # --- Stage 1b: harden stdlib getAppFilename() for wasi ----------------------
 # nim.wasm is emitted with --os:linux (Stage 2), so getAppFilename() resolves
@@ -116,7 +138,7 @@ say "[2/4] generating C sources for the Nim compiler"
 NIMCACHE="$WORK/nimcache"
 rm -rf "$NIMCACHE"; mkdir -p "$NIMCACHE"
 # --compileOnly + --genScript leaves all .c plus a compile script in nimcache.
-( cd "$SRC" && nim c \
+( cd "$SRC" && "$NIM_DRIVER" c \
     --compileOnly:on --genScript:on \
     --nimcache:"$NIMCACHE" \
     -d:release -d:nimcore --lib:lib --noNimblePath \
