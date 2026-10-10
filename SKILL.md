@@ -47,7 +47,7 @@ deployed static webpage folder); it defaults to `'project'` everywhere.
 | `makeDir(path, area?)` | `{path}` | idempotent. |
 | `syncFiles([[path, text], ...])` | `{written, unchanged, deleted}` | mirror a whole source tree into the project in one transaction: unchanged files skipped, files not listed removed. Use it instead of many `writeFile` calls. |
 | `deletePath(path, area?)` | `{deleted}` | folders delete recursively. |
-| `build()` | `{ok, summary, logs, deployed, skipped, siteFiles}` | the EXACT Build-button flow. |
+| `build({entry?, javascript?}?)` | `{ok, summary, logs, deployed, skipped, siteFiles}` | the Build-button flow; the site boots `entry` (default `main.nim`, independent of the entry picked in the GUI). `buildEntry()` takes the same options and compiles only the entry. |
 | `exportZip(area?)` | `{name, base64, files, bytes}` | zip as base64 — no download dialog. |
 
 `build()` runs the same pipeline as the Build button: it saves the open

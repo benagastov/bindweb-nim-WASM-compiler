@@ -452,7 +452,8 @@ examplesEl.addEventListener('change', async () => {
   try {
     await writeFile(AREA_WORKSPACE, path, ex.source);
     await openFile(path);
-    log(`loaded example "${ex.label}" into ${path} — press Run to try it`, 'info');
+    setBuildEntry(path);
+    log(`loaded example "${ex.label}" into ${path} — it is now the build entry; press Run or Build to try it`, 'info');
   } catch (e) {
     // Store unavailable: fall back to session-only editing.
     editor.value = ex.source;
@@ -964,6 +965,24 @@ const textDecoder = new TextDecoder();
 /** Path of the workspace file currently open in the editor (null = none). */
 let openPath = 'main.nim';
 
+/**
+ * The .nim file the deployed site boots ("build entry"). main.nim by
+ * default; picking an example makes that example the entry, and any .nim
+ * file can be made the entry from its row in the Project tab. Remembered
+ * per browser. Scripted builds (NimIDE.build) pass their own entry.
+ */
+const BUILD_ENTRY_KEY = 'bindweb.buildEntry';
+let buildEntryPath = 'main.nim';
+try { buildEntryPath = localStorage.getItem(BUILD_ENTRY_KEY) || 'main.nim'; } catch (e) { /* default */ }
+buildBtn.title = `Compile every .nim file in the project into the deployed site folder (entry: ${buildEntryPath})`;
+
+function setBuildEntry(path) {
+  buildEntryPath = path;
+  try { localStorage.setItem(BUILD_ENTRY_KEY, path); } catch (e) { /* session only */ }
+  buildBtn.title = `Compile every .nim file in the project into the deployed site folder (entry: ${path})`;
+  renderWorkspaceTree();
+}
+
 /** Collapsed folder paths per area (VS-Code-style tree state). */
 const collapsed = { [AREA_WORKSPACE]: new Set(), [AREA_SITE]: new Set() };
 
@@ -1166,6 +1185,11 @@ function startRename(row, node, area, refresh) {
       await saveOpenFile(); // don't let a pending save resurrect the old path
       const r = await renamePath(area, node.path, target);
       log(`${area === AREA_WORKSPACE ? 'project' : 'site'}: renamed ${r.from} -> ${r.to}`, 'info');
+      if (area === AREA_WORKSPACE) {
+        // The build entry follows its file through renames/moves.
+        if (buildEntryPath === r.from) setBuildEntry(r.to);
+        else if (buildEntryPath.startsWith(`${r.from}/`)) setBuildEntry(r.to + buildEntryPath.slice(r.from.length));
+      }
       if (area === AREA_WORKSPACE && openPath) {
         if (openPath === r.from) openPath = r.to;
         else if (openPath.startsWith(`${r.from}/`)) openPath = r.to + openPath.slice(r.from.length);
@@ -1320,9 +1344,22 @@ async function renderWorkspaceTree() {
     return;
   }
   for (const { node, depth } of flattenTree(buildTree(entries), AREA_WORKSPACE)) {
+    const extraActions = [];
+    if (!node.isDir && node.path.endsWith('.nim') && node.path !== buildEntryPath) {
+      const entryBtn = document.createElement('button');
+      entryBtn.textContent = 'entry';
+      entryBtn.title = 'Make this the build entry (the file the deployed site boots)';
+      entryBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setBuildEntry(node.path);
+        log(`project: ${node.path} is now the build entry`, 'info');
+      });
+      extraActions.push(entryBtn);
+    }
     wsTreeEl.appendChild(treeRow(node, depth, AREA_WORKSPACE, {
       onOpen: (n) => openFile(n.path),
-      badge: node.path === 'main.nim' ? 'build entry' : null,
+      extraActions,
+      badge: node.path === buildEntryPath ? 'build entry' : null,
     }));
   }
 }
@@ -1811,9 +1848,16 @@ async function performBuild(options = {}) {
     const nimFiles = projectFiles.filter((f) => f.path.endsWith('.nim'));
     const nimPaths = new Set(nimFiles.map((f) => f.path));
 
-    // Entry selection: main.nim at the root, else the .nim file open in
-    // the editor, else the current error dialog (unchanged behavior).
-    let entry = 'main.nim';
+    // Entry selection: the requested/chosen build entry, else main.nim,
+    // else the .nim file open in the editor, else an error dialog.
+    let entry = options.entry || buildEntryPath;
+    if (!nimPaths.has(entry) && nimPaths.has('main.nim')) {
+      if (!options.entry && entry !== 'main.nim') {
+        log(`build: build entry ${entry} no longer exists — using main.nim`, 'warn');
+        setBuildEntry('main.nim');
+      }
+      entry = 'main.nim';
+    }
     if (!nimPaths.has(entry)) {
       if (openPath && openPath.endsWith('.nim') && nimPaths.has(openPath)) {
         entry = openPath;
