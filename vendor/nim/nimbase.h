@@ -15,8 +15,6 @@ __TINYC__
 __clang__
 __AVR__
 __arm__
-__riscv
-__EMSCRIPTEN__
 */
 
 
@@ -111,7 +109,7 @@ __EMSCRIPTEN__
 
 /*
   NIM_THREADVAR declaration based on
-  https://stackoverflow.com/questions/18298280/how-to-declare-a-variable-as-thread-local-portably
+  http://stackoverflow.com/questions/18298280/how-to-declare-a-variable-as-thread-local-portably
 */
 #if defined _WIN32
 #  if defined _MSC_VER || defined __BORLANDC__
@@ -180,13 +178,12 @@ __EMSCRIPTEN__
 #  define N_THISCALL_PTR(rettype, name) rettype (__thiscall *name)
 #  define N_SAFECALL_PTR(rettype, name) rettype (__stdcall *name)
 
-#  ifdef __EMSCRIPTEN__
-#    define N_LIB_EXPORT  NIM_EXTERNC __declspec(dllexport) __attribute__((used))
-#    define N_LIB_EXPORT_VAR  __declspec(dllexport) __attribute__((used))
+#  ifdef __cplusplus
+#    define N_LIB_EXPORT  NIM_EXTERNC __declspec(dllexport)
 #  else
 #    define N_LIB_EXPORT  NIM_EXTERNC __declspec(dllexport)
-#    define N_LIB_EXPORT_VAR  __declspec(dllexport)
 #  endif
+#  define N_LIB_EXPORT_VAR  __declspec(dllexport)
 #  define N_LIB_IMPORT  extern __declspec(dllimport)
 #else
 #  define N_LIB_PRIVATE __attribute__((visibility("hidden")))
@@ -215,13 +212,8 @@ __EMSCRIPTEN__
 #    define N_FASTCALL_PTR(rettype, name) rettype (*name)
 #    define N_SAFECALL_PTR(rettype, name) rettype (*name)
 #  endif
-#  ifdef __EMSCRIPTEN__
-#    define N_LIB_EXPORT NIM_EXTERNC __attribute__((visibility("default"), used))
-#    define N_LIB_EXPORT_VAR  __attribute__((visibility("default"), used))
-#  else
-#    define N_LIB_EXPORT NIM_EXTERNC __attribute__((visibility("default")))
-#    define N_LIB_EXPORT_VAR  __attribute__((visibility("default")))
-#  endif
+#  define N_LIB_EXPORT NIM_EXTERNC __attribute__((visibility("default")))
+#  define N_LIB_EXPORT_VAR  __attribute__((visibility("default")))
 #  define N_LIB_IMPORT  extern
 #endif
 
@@ -274,15 +266,11 @@ __EMSCRIPTEN__
 #elif defined(__cplusplus)
 #define NIM_STATIC_ASSERT(x, msg) static_assert((x), msg)
 #else
-#define _NIM_STATIC_ASSERT_FINAL(x, append_name) typedef int NIM_STATIC_ASSERT_AUX ## append_name[(x) ? 1 : -1];
-#define _NIM_STATIC_ASSERT_STAGE_3(x, line)      _NIM_STATIC_ASSERT_FINAL(x, _AT_LINE_##line)
-#define _NIM_STATIC_ASSERT_STAGE_2(x, line)      _NIM_STATIC_ASSERT_STAGE_3(x, line)
-#define NIM_STATIC_ASSERT(x, msg)                _NIM_STATIC_ASSERT_STAGE_2(x,__LINE__)
+#define NIM_STATIC_ASSERT(x, msg) typedef int NIM_STATIC_ASSERT_AUX[(x) ? 1 : -1];
 // On failure, your C compiler will say something like:
-//   "error: 'NIM_STATIC_ASSERT_AUX_AT_LINE_XXX' declared as an array with a negative size"
-// Adding the line number helps to avoid redefinitions which are not allowed in
-// old GCC versions, however the order of evaluation for __LINE__ is a little tricky,
-// hence all the helper macros. See https://stackoverflow.com/a/3385694 for more info.
+//   "error: 'NIM_STATIC_ASSERT_AUX' declared as an array with a negative size"
+// we could use a better fallback to also show line number, using:
+// http://www.pixelbeat.org/programming/gcc/static_assert.html
 #endif
 
 /* C99 compiler? */
@@ -479,8 +467,7 @@ typedef char* NCSTRING;
 /* declared size of a sequence/variable length array: */
 #if defined(__cplusplus) && defined(__clang__)
 #  define SEQ_DECL_SIZE 1
-#elif defined(__GNUC__) || defined(_MSC_VER) || defined(__TINYC__) || \
-        (defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901)) // C99
+#elif defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)
 #  define SEQ_DECL_SIZE /* empty is correct! */
 #else
 #  define SEQ_DECL_SIZE 1000000
@@ -491,22 +478,13 @@ typedef char* NCSTRING;
 
 #define paramCount() cmdCount
 
-#ifndef NAN  /* use __builtin_nanf which is faster, if available */
-#  if defined(__GNUC__)
-#    define NAN (__builtin_nanf(""))
-#  elif defined(__clang__) /* XXX: writing __has_builtin this line cause MSVC complains. */
-#    if __has_builtin (__builtin_nanf)
-#      define NAN (__builtin_nanf(""))
-#    endif
-#  endif
-#endif
-
-#ifndef NAN  /* modified from math.h included in the Windows SDK version 10.0.26100.0 */
+// NAN definition copied from math.h included in the Windows SDK version 10.0.14393.0
+#ifndef NAN
 #  ifndef _HUGE_ENUF
-#    define _HUGE_ENUF  1e+300  /* _HUGE_ENUF*_HUGE_ENUF must overflow */
+#    define _HUGE_ENUF  1e+300  // _HUGE_ENUF*_HUGE_ENUF must overflow
 #  endif
 #  define NAN_INFINITY ((float)(_HUGE_ENUF * _HUGE_ENUF))
-#  define NAN (-(float)(NAN_INFINITY * 0.0F))
+#  define NAN ((float)(NAN_INFINITY * 0.0F))
 #endif
 
 #ifndef INF
@@ -596,8 +574,8 @@ NIM_STATIC_ASSERT(sizeof(NI) == sizeof(void*) && NIM_INTBITS == sizeof(NI)*8, "P
   #define nimMulInt64(a, b, res) __builtin_smulll_overflow(a, b, (long long int*)res)
 
   #if NIM_INTBITS == 32
-    #if (defined(__arm__) || defined(__riscv)) && defined(__GNUC__)
-      /* arm-none-eabi-gcc and riscv32-unknown-elf-gcc targets define int32_t as long int */
+    #if defined(__arm__) && defined(__GNUC__)
+      /* arm-none-eabi-gcc targets defines int32_t as long int */
       #define nimAddInt(a, b, res) __builtin_saddl_overflow(a, b, res)
       #define nimSubInt(a, b, res) __builtin_ssubl_overflow(a, b, res)
       #define nimMulInt(a, b, res) __builtin_smull_overflow(a, b, res)

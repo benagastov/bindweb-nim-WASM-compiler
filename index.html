@@ -13,7 +13,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nim Playground — runs in your browser</title>
+<title>Nim WASM in-Browser Compiler — runs in your browser</title>
 <style>
   :root {
     /* Dark-neutral, low-saturation palette (SPEC §8c: no gradients). */
@@ -742,7 +742,7 @@
     </select>
     <span class="spacer"></span>
     <span id="status">Getting ready…</span>
-    <button id="btn-build" disabled title="Compile the project (entry: main.nim) into the deployed site folder">Build</button>
+    <button id="btn-build" disabled title="Compile every .nim file in the project into the deployed site folder (entry: main.nim)">Build</button>
     <button id="btn-run" disabled title="Compile and run the file open in the editor">Run</button>
   </header>
 
@@ -773,6 +773,7 @@
           <button class="lib-btn" id="ws-new-folder" type="button">New folder</button>
           <button class="lib-btn secondary" id="ws-upload-btn" type="button">Upload…</button>
           <input type="file" id="ws-upload" multiple hidden>
+          <button class="lib-btn secondary" id="ws-export-zip" type="button">Export ZIP</button>
         </div>
         <div id="ws-status"></div>
         <div id="ws-tree"></div>
@@ -782,19 +783,22 @@
           mounted at <code>/workspace</code> on every compile, so
           <code>import sibling</code> and <code>import sub/mod</code> work.
           <strong>Run</strong> compiles the file open in the editor;
-          <strong>Build</strong> compiles <code>main.nim</code> into the Site folder.
+          <strong>Build</strong> compiles every <code>.nim</code> file into
+          its own <code>.wasm</code> in the Site folder.
+          <strong>Export ZIP</strong> downloads the whole folder.
         </p>
       </div>
 
       <!-- Site sub-tab: the deployed static webpage folder. Build writes
-           index.html + app.wasm + the runtime here; the app pane renders
-           this folder's index.html. -->
+           index.html (JS runtime inlined) + one .wasm per project .nim
+           file here; the app pane renders this folder's index.html. -->
       <div class="vfs-view" id="site-view" hidden>
         <div class="vfs-toolbar">
           <button class="lib-btn" id="site-open-tab" type="button">Open site in new tab</button>
           <button class="lib-btn secondary" id="site-refresh" type="button">Show in app pane</button>
           <button class="lib-btn secondary" id="site-upload-btn" type="button">Upload…</button>
           <input type="file" id="site-upload" multiple hidden>
+          <button class="lib-btn secondary" id="site-export-zip" type="button">Export ZIP</button>
           <button class="lib-btn secondary" id="site-clear" type="button">Clear…</button>
         </div>
         <div id="site-status"></div>
@@ -803,10 +807,23 @@
           This is the deployed static website — the working folder of the app
           pane, which renders this folder's <code>index.html</code>. Press
           <strong>Build</strong> to compile your project into it
-          (<code>app.wasm</code> + <code>index.html</code> + the runtime).
-          You can add your own files (CSS, images, …) — Build only overwrites
-          <code>app.wasm</code>, <code>nim-runtime/*</code> and a generated
-          <code>index.html</code>.
+          (one <code>.wasm</code> per <code>.nim</code> file +
+          <code>index.html</code> with the JS runtime inlined, minified;
+          the entry's wasm is the one <code>index.html</code> boots).
+          <strong>Export ZIP</strong> downloads
+          the whole folder. You can add your own files (CSS, images, …) —
+          Build only writes generated <code>.wasm</code> files and a
+          generated <code>index.html</code> (a hand-edited
+          <code>index.html</code> is kept, and only then does Build
+          write <code>nim-runtime/*</code> next to it — legacy mode),
+          and it removes stale <code>.wasm</code> files that no longer match
+          a project <code>.nim</code> source — an uploaded <code>.wasm</code>
+          matching no project module is removed on Build; non-wasm uploads
+          are never touched. Built <code>.wasm</code> files are obfuscated
+          (Nim name/producers sections stripped, decoy GCC comment injected),
+          and calling <code>bindDomain("example.com")</code> in your Nim code
+          makes the deployed site refuse to boot on any other domain —
+          deterrence against casual theft, not cryptographic security.
         </p>
       </div>
 
@@ -817,7 +834,7 @@
           <div class="lib-section-title">Add from a GitHub link</div>
           <div class="lib-row">
             <input type="text" id="lib-url" spellcheck="false"
-                   placeholder="https://github.com/PMunch/protobuf-nim">
+                   placeholder="https://github.com/nim-lang/checksums">
             <button class="lib-btn" id="lib-add" type="button">Add</button>
           </div>
           <div class="lib-section-title">…or upload a .zip of the library</div>
@@ -838,7 +855,7 @@
           Libraries are stored in your browser (IndexedDB) and mounted at
           <code>/libs/&lt;name&gt;</code> before every compile — adding or
           removing one takes effect on the next Run, no reload needed. After
-          adding protobuf-nim, for example, <code>import protobuf</code> just works.
+          adding nim-lang/checksums, for example, <code>import checksums/md5</code> just works.
         </p>
       </div>
     </section>
@@ -879,117 +896,5 @@
   </div>
 
   <script type="module" src="./src/main.js"></script>
-<style>
-#minimax-floating-ball {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  padding: 10px 12px;
-  background: #222222;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  color: #F8F8F8;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-  z-index: 9999;
-  transition: all 0.3s ease;
-  overflow: hidden;
-  cursor: pointer;
-}
-
-#minimax-floating-ball:hover {
-  transform: translateY(-2px);
-  background: #383838;
-}
-.minimax-ball-content {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.minimax-logo-wave {
-  width: 20px;
-  height: 20px;
-  background-image: url("data:image/svg+xml,%3Csvg%20preserveAspectRatio%3D%27none%27%20width%3D%27100%25%27%20height%3D%27100%25%27%20overflow%3D%27visible%27%20style%3D%27display%3A%20block%3B%27%20viewBox%3D%270%200%20170.136%20138.225%27%20fill%3D%27none%27%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%3E%3Cg%20id%3D%27Frame%202116748449%27%3E%3Cpath%20id%3D%27Subtract%27%20d%3D%27M170%20101.783C170%20105.144%20168.49%20108.327%20165.886%20110.453L134.963%20135.702C132.964%20137.334%20130.463%20138.225%20127.883%20138.225H10.4938C4.69824%20138.225%200%20133.527%200%20127.732V39.2289C0%2035.8597%201.51758%2032.6698%204.13162%2030.5442L38.5402%202.56547C40.536%200.942662%2043.0298%200.0567377%2045.602%200.0567377H159.506C165.302%200.0567377%20170%204.75498%20170%2010.5506V101.783Z%27%20fill%3D%27black%27%20style%3D%27fill%3Ablack%3Bfill-opacity%3A1%3B%27/%3E%3Cpath%20id%3D%27Subtract_2%27%20d%3D%27M149.011%2094.4632C149.011%2096.1471%20148.253%2097.7415%20146.946%2098.8043L125.893%20115.936C124.895%20116.748%20123.648%20117.191%20122.361%20117.191H24.6479C22.716%20117.191%2021.15%20115.625%2021.15%20113.693V46.1166C21.15%2044.4267%2021.9135%2042.8274%2023.2274%2041.7648L47.367%2022.2437C48.3638%2021.4376%2049.607%2020.9982%2050.8888%2020.9988L145.514%2021.0427C147.446%2021.0436%20149.011%2022.6094%20149.011%2024.5406V94.4632Z%27%20fill%3D%27white%27%20style%3D%27fill%3Awhite%3Bfill-opacity%3A1%3B%27/%3E%3Cpath%20id%3D%27Rectangle%20111142564%27%20d%3D%27M42.111%2080.8025C42.111%2077.7115%2044.6167%2075.2057%2047.7077%2075.2057H60.9999C64.0908%2075.2057%2066.5966%2077.7115%2066.5966%2080.8025V121.029H42.111V80.8025Z%27%20fill%3D%27black%27%20style%3D%27fill%3Ablack%3Bfill-opacity%3A1%3B%27/%3E%3Cpath%20id%3D%27Rectangle%20111142567%27%20d%3D%27M79.1894%2080.8025C79.1894%2077.7115%2081.6952%2075.2057%2084.7861%2075.2057H98.0783C101.169%2075.2057%20103.675%2077.7115%20103.675%2080.8025V121.029H79.1894V80.8025Z%27%20fill%3D%27black%27%20style%3D%27fill%3Ablack%3Bfill-opacity%3A1%3B%27/%3E%3C/g%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: center;
-  background-size: 14px 11px;
-  background-color: #8FD1FF;
-  border-radius: 4px;
-}
-
-.minimax-ball-text {
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.minimax-close-icon {
-  margin-left: 8px;
-  font-size: 16px;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.2s ease;
-}
-
-.minimax-close-icon:hover {
-  opacity: 1;
-}
-</style>
-<div id="minimax-floating-ball">
-  <div class="minimax-ball-content">
-    <div class="minimax-logo-wave"></div>
-    <span class="minimax-ball-text">Created by MiniMax Agent</span>
-  </div>
-  <div class="minimax-close-icon">×</div>
-</div>
-<script>
-// Initialize floating ball functionality
-function initFloatingBall() {
-  const ball = document.getElementById('minimax-floating-ball');
-  if (!ball) return;
-
-  // Initial animation
-  ball.style.opacity = '0';
-  ball.style.transform = 'translateY(20px)';
-
-  setTimeout(() => {
-    ball.style.opacity = '1';
-    ball.style.transform = 'translateY(0)';
-  }, 500);
-
-  // Handle logo click
-  const ballContent = ball.querySelector('.minimax-ball-content');
-  ballContent.addEventListener('click', function (e) {
-    e.stopPropagation();
-    window.open('https://agent.minimax.io/', '_blank');
-    ball.style.transform = 'scale(0.95)';
-    setTimeout(() => {
-      ball.style.transform = 'scale(1)';
-    }, 100);
-  });
-
-  // Handle close button click
-  const closeIcon = ball.querySelector('.minimax-close-icon');
-  closeIcon.addEventListener('click', function (e) {
-    e.stopPropagation();
-    ball.style.opacity = '0';
-    ball.style.transform = 'translateY(20px)';
-
-    setTimeout(() => {
-      ball.style.display = 'none';
-    }, 300);
-  });
-}
-
-// Initialize when DOM is ready
-document.addEventListener('DOMContentLoaded', initFloatingBall); 
-</script>
 </body>
 </html>
