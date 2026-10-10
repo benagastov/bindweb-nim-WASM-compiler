@@ -137,6 +137,14 @@ re-hosting and drive-by debugging; they are *not* cryptographic security —
 a determined attacker with time can patch any check that runs in their own
 browser.
 
+## Build performance
+
+Builds are cached and parallel: an unchanged project skips Nim→C, unchanged
+C files come from an object cache, oversized C files are split into codegen
+units, and the rest compile on a pool of clang workers (QGraph: 133 s → 41 s
+cold, 3.5 s rebuild). Details, numbers and profiling switches are in
+**`PERFORMANCE.md`**.
+
 ## Toolchain notes
 
 Both compilers ship as prebuilt WebAssembly modules, pinned and SHA-256

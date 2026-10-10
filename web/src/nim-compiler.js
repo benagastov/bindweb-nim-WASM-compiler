@@ -117,6 +117,82 @@ const NIM_FLAGS = [
   '-o:main.wasm',
 ];
 
+
+/* --------------------------------------------------------------------------
+ * Nim output cache. nim.wasm is a pure function of (compiler binary, argv,
+ * every file it can see), so when none of those changed the C files of the
+ * previous compile are reused and the whole Nim step (~5 s for a 56-module
+ * app) is skipped. Keyed by SHA-256 over the compiler bytes, argv and the
+ * full contents of every mounted source tree; kept in IndexedDB, newest
+ * NIM_CACHE_MAX entries only. localStorage "bindweb.nimCache" = "off"
+ * disables it.
+ * ------------------------------------------------------------------------ */
+
+const NIM_CACHE_MAX = 8;
+const NIM_CACHE_ROOTS = ['/workspace', '/libs', '/nim', '/bindweb', '/project'];
+const NIM_CACHE_SKIP = new Set(['/project/cache', '/project/out.txt', '/project/err.txt']);
+
+function nimCacheEnabled() {
+  try { return globalThis.localStorage?.getItem('bindweb.nimCache') !== 'off'; } catch (e) { return true; }
+}
+
+function openNimCache() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('bindweb-nim-cache', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('out');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function nimCacheOp(mode, fn) {
+  const db = await openNimCache();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction('out', mode);
+      let value;
+      Promise.resolve(fn(tx.objectStore('out'))).then((v) => { value = v; }, reject);
+      tx.oncomplete = () => resolve(value);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('nim cache transaction aborted'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+const idbReq = (req) => new Promise((resolve, reject) => {
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+
+/** Every regular file under NIM_CACHE_ROOTS as [path, bytes], path-sorted. */
+function snapshotSources(FS) {
+  const out = [];
+  const walk = (dir) => {
+    let names;
+    try { names = FS.readdir(dir); } catch (e) { return; }
+    for (const name of names.sort()) {
+      if (name === '.' || name === '..') continue;
+      const path = `${dir}/${name}`;
+      if (NIM_CACHE_SKIP.has(path)) continue;
+      let st;
+      try { st = FS.stat(path); } catch (e) { continue; }
+      if (FS.isDir(st.mode)) walk(path);
+      else if (FS.isFile(st.mode)) out.push([path, FS.readFile(path)]);
+    }
+  };
+  for (const root of NIM_CACHE_ROOTS) walk(root);
+  return out;
+}
+
+async function sha256Hex(bytes) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  let h = '';
+  for (const b of d) h += b.toString(16).padStart(2, '0');
+  return h;
+}
+
 /**
  * nimcache candidates, in priority order. The first entry is the SPEC §5
  * location requested via --nimcache; the rest are the legacy IDE's
@@ -543,6 +619,22 @@ export class NimCompiler {
     // working for top-level modules referenced from nested entry files.
     const workspacePaths = this._workspaceMounted ? ['--path:/workspace'] : [];
     const argv = options.flags || [...NIM_FLAGS, ...workspacePaths, ...userPaths, outFile];
+    const cacheKey = await this._cacheKey(FS, argv).catch((e) => {
+      this.onLog(`nim cache: disabled for this compile (${e.message || e})`, 'warn');
+      return null;
+    });
+    if (cacheKey) {
+      const hit = await nimCacheOp('readwrite', async (store) => {
+        const rec = await idbReq(store.get(cacheKey));
+        if (rec) { rec.used = Date.now(); store.put(rec, cacheKey); }
+        return rec;
+      }).catch(() => null);
+      if (hit) {
+        this.onLog(`nim: ${hit.cfiles.length} C files from the Nim output cache (sources unchanged, compile skipped)`, 'info');
+        return { ok: true, cfiles: hit.cfiles, stdout: hit.stdout, stderr: hit.stderr, rc: hit.rc, cached: true };
+      }
+    }
+
     let rc = -1;
     let stdoutBuf = '';
     let stderrBuf = '';
@@ -592,6 +684,42 @@ export class NimCompiler {
     // Emscripten glue versions return undefined from callMain on success,
     // so an undefined rc is not treated as failure.
     const ok = cfiles.length > 0 && (rc === 0 || rc === null || rc === undefined);
+    if (ok && cacheKey) {
+      const rec = { cfiles, stdout: stdoutBuf, stderr: stderrBuf, rc, used: Date.now() };
+      await nimCacheOp('readwrite', async (store) => {
+        store.put(rec, cacheKey);
+        const keys = await idbReq(store.getAllKeys());
+        if (keys.length <= NIM_CACHE_MAX) return;
+        const recs = await idbReq(store.getAll());
+        const order = keys.map((k, i) => [k, recs[i].used || 0]).sort((a, b) => a[1] - b[1]);
+        for (const [k] of order.slice(0, keys.length - NIM_CACHE_MAX)) store.delete(k);
+      }).catch((e) => this.onLog(`nim cache: could not store (${e.message || e})`, 'warn'));
+    }
     return { ok, cfiles, stdout: stdoutBuf, stderr: stderrBuf, rc };
+  }
+
+  /**
+   * Cache key of one compile: SHA-256 over the nim.wasm bytes, argv and
+   * every visible source file. Null when caching is off.
+   *
+   * @private
+   */
+  async _cacheKey(FS, argv) {
+    if (!nimCacheEnabled() || typeof indexedDB === 'undefined' || !crypto?.subtle) return null;
+    if (!this._compilerHash) {
+      this._compilerHash = fetch(this._locateFile('nim.wasm'))
+        .then((r) => r.arrayBuffer()).then((b) => sha256Hex(b));
+    }
+    const enc = new TextEncoder();
+    const parts = [enc.encode(`nim-out-v1 ${await this._compilerHash} ${argv.join(' ')} `)];
+    for (const [path, data] of snapshotSources(FS)) {
+      parts.push(enc.encode(`${path} ${data.length} `), data);
+    }
+    let n = 0;
+    for (const p of parts) n += p.length;
+    const all = new Uint8Array(n);
+    n = 0;
+    for (const p of parts) { all.set(p, n); n += p.length; }
+    return sha256Hex(all);
   }
 }

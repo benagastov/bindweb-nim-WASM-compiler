@@ -52,6 +52,9 @@ JavaScript payload described below is separate and is not a secrecy boundary.
    created implicitly; `makeDir`/`deletePath`/`listFiles`/`readFile`
    round out the file ops. `area` selects the folder: `'project'`
    (default) or `'site'`.
+   To upload a whole source tree use `NimIDE.syncFiles([[path, text], …])`:
+   one transaction, unchanged files skipped, files not listed removed
+   (56 files: ~2 s with `writeFile`, ~0.2 s with `syncFiles`).
 3. Build with `const r = await NimIDE.build()`. This is *the exact
    Build-button flow* (same code path, same UI side effects, buttons
    disabled while it runs, unsaved editor changes saved first, one build

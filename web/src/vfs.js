@@ -231,6 +231,63 @@ export async function writeFile(area, rawPath, data) {
 }
 
 /**
+ * Make an area hold exactly `files` (a build driver's source mirror) in ONE
+ * transaction: unchanged files are left alone, changed/new ones written,
+ * files absent from `files` deleted (folders are kept). Per-file
+ * writeFile() opens the database and commits once per file, which made a
+ * 56-file upload cost ~2 s; this does it in tens of milliseconds.
+ *
+ * @param {string} area
+ * @param {Array<[string, string|Uint8Array]>} files [path, contents] pairs
+ * @returns {Promise<{written: string[], unchanged: number, deleted: number}>}
+ */
+export async function syncFiles(area, files) {
+  const want = new Map();
+  for (const [rawPath, data] of files) {
+    want.set(normalizeVfsPath(rawPath), typeof data === 'string' ? encoder.encode(data) : data);
+  }
+  return withStore(area, 'readwrite', async (store) => {
+    const have = new Map();
+    for (const rec of await reqToPromise(store.getAll())) have.set(rec.path, rec);
+    const written = [];
+    let unchanged = 0;
+    let deleted = 0;
+    const now = Date.now();
+    for (const [path, rec] of have) {
+      if (!rec.isDir && !want.has(path)) { store.delete(path); deleted++; }
+    }
+    for (const [path, bytes] of want) {
+      const old = have.get(path);
+      if (old && old.isDir) throw new Error(`a folder named "${path}" blocks the file of the same name`);
+      if (old && sameBytes(old.data, bytes)) { unchanged++; continue; }
+      for (let dir = parentDirPath(path); dir; dir = parentDirPath(dir)) {
+        const d = have.get(dir);
+        if (d && !d.isDir) throw new Error(`a file named "${dir}" blocks the folder of the same name`);
+        if (!d) {
+          const rec = { path: dir, isDir: true, data: new Uint8Array(0), updatedAt: now };
+          have.set(dir, rec);
+          store.put(rec);
+        }
+      }
+      store.put({ path, isDir: false, data: bytes, updatedAt: now });
+      written.push(path);
+    }
+    await new Promise((resolve, reject) => {
+      store.transaction.oncomplete = resolve;
+      store.transaction.onerror = () => reject(store.transaction.error);
+      store.transaction.onabort = () => reject(store.transaction.error || new Error('file store sync aborted'));
+    });
+    return { written, unchanged, deleted };
+  });
+}
+
+function sameBytes(a, b) {
+  if (!a || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
  * Create a folder record (and any missing parents). Idempotent.
  *
  * @param {string} area

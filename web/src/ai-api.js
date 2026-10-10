@@ -18,8 +18,8 @@
 import {
   AREA_WORKSPACE, AREA_SITE,
   listFiles as vfsListFiles, readFile as vfsReadFile, writeFile as vfsWriteFile,
-  makeDir as vfsMakeDir, deletePath as vfsDeletePath,
-  getFilesWithData, isLikelyBinary,
+  makeDir as vfsMakeDir, deletePath as vfsDeletePath, syncFiles as vfsSyncFiles,
+  getFilesWithData, isLikelyBinary, normalizeVfsPath,
 } from './vfs.js';
 import { zipFiles } from './zip.js';
 import { protectWasm } from './wasm-obfuscate.js';
@@ -160,6 +160,24 @@ export function installNimIDE(hooks) {
     },
 
     /**
+     * Mirror a whole source tree into the project in one transaction:
+     * unchanged files are skipped, changed/new ones written, files not in
+     * the list deleted. Build drivers use this instead of N writeFile calls.
+     *
+     * @param {Array<[string, string]>} files [path, text] pairs
+     * @returns {Promise<{written: number, unchanged: number, deleted: number}>}
+     */
+    async syncFiles(files) {
+      const r = await vfsSyncFiles(AREA_WORKSPACE, files);
+      if (hooks.syncEditor && r.written.length) {
+        const text = new Map(files.map(([p, t]) => [normalizeVfsPath(p), t]));
+        for (const p of r.written) hooks.syncEditor(p, text.has(p) ? String(text.get(p)) : null);
+      }
+      refresh();
+      return { written: r.written.length, unchanged: r.unchanged, deleted: r.deleted };
+    },
+
+    /**
      * Create a folder (and missing parents). Idempotent.
      *
      * @param {string} path
@@ -240,6 +258,35 @@ export function installNimIDE(hooks) {
       let result;
       try {
         result = await hooks.runBuild({ entryOnly: true, javascript });
+      } finally {
+        untap();
+      }
+      const siteEntries = await vfsListFiles(AREA_SITE).catch(() => []);
+      return {
+        ok: !!result.ok,
+        summary: String(result.summary || ''),
+        logs,
+        deployed: Array.isArray(result.deployed) ? result.deployed.slice() : [],
+        skipped: Array.isArray(result.skipped) ? result.skipped.slice() : [],
+        siteFiles: siteEntries.filter((e) => !e.isDir).map((e) => e.path),
+      };
+    },
+
+    /**
+     * Compile and package only the project entry. Imported Nim modules are
+     * already linked into that self-contained WASM; this avoids compiling
+     * every helper again as an unrelated standalone app during automated
+     * edit/test loops. The normal Build button and build() retain the full
+     * all-module behavior.
+     */
+    async buildEntry() {
+      const logs = [];
+      const untap = hooks.addLogListener((msg, kind) => {
+        logs.push(kind === 'info' ? msg : `[${kind}] ${msg}`);
+      });
+      let result;
+      try {
+        result = await hooks.runBuild({ entryOnly: true });
       } finally {
         untap();
       }
