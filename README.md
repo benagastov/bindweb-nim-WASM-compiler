@@ -54,8 +54,8 @@ pane. **Build** compiles *every* `.nim` file in the Project tree into its
 own self-contained `.wasm` in the Site folder, mirroring the project
 paths (`adios.nim` → `adios.wasm`, `sub/mod.nim` → `sub/mod.wasm`); each
 module statically includes the Nim runtime, wasi-libc and the bindweb C
-runtime. The generated `index.html` boots the entry module (`main.nim` →
-`main.wasm`, falling back to the open `.nim` file) and carries the whole
+runtime. The generated `index.html` boots the **build entry** (see below)
+and carries the whole
 JS runtime (WASI shim, bindweb runtime, loader, boot script) inlined as
 ONE obfuscated payload script — so a generated site is just `index.html`
 plus one `.wasm` per module, with no `nim-runtime/` folder. If a
@@ -66,6 +66,30 @@ referencing `nim-runtime/*.js` keep working — and it removes stale
 `.wasm` files that no longer match a project `.nim` source (including a
 legacy `app.wasm`) — an uploaded `.wasm` file sharing no name with a
 project module is removed on Build; non-wasm uploads are never touched.
+
+### The build entry: which module the site boots
+
+Every `.nim` file becomes its own `.wasm`, but the site's `index.html`
+starts exactly one of them — the **build entry**. The Project tab marks it
+with a `build entry` badge.
+
+- By default the entry is `main.nim` → `main.wasm`.
+- **Picking an example** from the Examples menu saves it as
+  `examples/<name>.nim`, opens it, and makes it the build entry, so both
+  **Run** and **Build** show that example. Your `main.nim` is not touched.
+- To choose another entry, press the **entry** button on any `.nim` row
+  in the Project tab (e.g. on `main.nim` to switch back).
+- The choice is remembered in this browser and follows the file through
+  renames and moves. If the entry file is deleted, Build falls back to
+  `main.nim` (then to the open `.nim` file) and says so in Messages.
+
+The Build log names the module it boots, for example
+`build: index.html generated (boots examples/rotate.wasm; …)`.
+
+Scripted builds don't use the entry picked in the page:
+`NimIDE.build()` / `NimIDE.buildEntry()` boot `main.nim` unless you pass
+`{entry: 'path/to/file.nim'}`. That keeps CLI and agent builds
+deterministic whatever a person last clicked in the GUI.
 
 **Export ZIP** (in both the Project and Site toolbars) downloads the whole
 folder — files and empty folders — from the browser's IndexedDB store as
@@ -85,6 +109,7 @@ via the DevTools console, CDP `Runtime.evaluate`, or Playwright:
 await NimIDE.ready();
 await NimIDE.writeFile('main.nim', 'echo "hi"\n');
 const r = await NimIDE.build();          // {ok, summary, logs, deployed, …}
+await NimIDE.build({entry: 'examples/rotate.nim'}); // boot another module
 const z = await NimIDE.exportZip('site'); // {name, base64, files, bytes}
 ```
 
