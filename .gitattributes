@@ -1,0 +1,5 @@
+# wcc toolchain: the patch must apply byte-for-byte, scripts run under bash.
+toolchain/wcc/patches/*.patch -text
+toolchain/wcc/tools/*.sh text eol=lf
+toolchain/fetch-wcc.sh text eol=lf
+toolchain/wcc/prebuilt/* binary

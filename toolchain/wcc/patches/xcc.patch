@@ -1,0 +1,493 @@
+diff --git a/include/float.h b/include/float.h
+index cf20a87..756cb21 100644
+--- a/include/float.h
++++ b/include/float.h
+@@ -1,25 +1,40 @@
+-#pragma once
++#pragma once
++
++#define FLT_RADIX       (2)
++
++#define DBL_MANT_DIG    (53)
++#define DBL_DIG         (15)
++#define DBL_MIN_EXP     (-1021)
++#define DBL_MAX_EXP     (1024)
++#define DBL_MIN_10_EXP  (-307)
++#define DBL_MAX_10_EXP  (308)
++#define DBL_MIN         (2.2250738585072014e-308)
++#define DBL_MAX         (0x1.fffffffffffffp+1023)  // (1.7976931348623158e+308)
++#define DBL_EPSILON     (2.220446049250313e-16)
++
++#define FLT_MANT_DIG    (24)
++#define FLT_DIG         (6)
++#define FLT_MIN_EXP     (-125)
++#define FLT_MAX_EXP     (128)
++#define FLT_MIN_10_EXP  (-37)
++#define FLT_MAX_10_EXP  (38)
++#define FLT_MIN         (1.1754943508222875e-38f)
++#define FLT_MAX         (0x1.fffffep+127f)  // (3.4028234663852885e+38f)
++#define FLT_EPSILON     (1.1920928955078125e-07f)
++
++#define FLT_ROUNDS  (1)  // TODO
+ 
+-#define FLT_RADIX       (2)
+-
+-#define DBL_MANT_DIG    (53)
+-#define DBL_DIG         (15)
+-#define DBL_MIN_EXP     (-1021)
+-#define DBL_MAX_EXP     (1024)
+-#define DBL_MIN_10_EXP  (-307)
+-#define DBL_MAX_10_EXP  (308)
+-#define DBL_MIN         (2.2250738585072014e-308)
+-#define DBL_MAX         (0x1.fffffffffffffp+1023)  // (1.7976931348623158e+308)
+-#define DBL_EPSILON     (2.220446049250313e-16)
+-
+-#define FLT_MANT_DIG    (24)
+-#define FLT_DIG         (6)
+-#define FLT_MIN_EXP     (-125)
+-#define FLT_MAX_EXP     (128)
+-#define FLT_MIN_10_EXP  (-37)
+-#define FLT_MAX_10_EXP  (38)
+-#define FLT_MIN         (1.1754943508222875e-38f)
+-#define FLT_MAX         (0x1.fffffep+127f)  // (3.4028234663852885e+38f)
+-#define FLT_EPSILON     (1.1920928955078125e-07f)
+-
+-#define FLT_ROUNDS  (1)  // TODO
++/* wcc has no wider long double: it is double. */
++#define LDBL_MANT_DIG   DBL_MANT_DIG
++#define LDBL_DIG        DBL_DIG
++#define LDBL_MIN_EXP    DBL_MIN_EXP
++#define LDBL_MAX_EXP    DBL_MAX_EXP
++#define LDBL_MIN_10_EXP DBL_MIN_10_EXP
++#define LDBL_MAX_10_EXP DBL_MAX_10_EXP
++#define LDBL_MIN        DBL_MIN
++#define LDBL_MAX        DBL_MAX
++#define LDBL_EPSILON    DBL_EPSILON
++#define FLT_EVAL_METHOD 0
++#define DECIMAL_DIG     17
++#define FLT_TRUE_MIN    (1.40129846432481707092e-45f)
++#define DBL_TRUE_MIN    (4.94065645841246544177e-324)
+diff --git a/include/string.h b/include/string.h
+index 0ce9ba0..f2eaf83 100644
+--- a/include/string.h
++++ b/include/string.h
+@@ -29,6 +29,7 @@ void *memcpy(void *dst, const void *src, size_t n);
+ void *memccpy(void *dst, const void *src, int c, size_t n);
+ void *memmove(void *dst, const void *src, size_t);
+ void *memset(void *buf, int val, size_t size);
++void *memmem(const void *haystack, size_t hlen, const void *needle, size_t nlen);
+ void *memchr(const void *buf, int c, size_t n);
+ int memcmp(const void *buf1, const void *buf2, size_t n);
+ 
+diff --git a/libsrc/stdio/stdin.c b/libsrc/stdio/stdin.c
+index 6690272..1154627 100644
+--- a/libsrc/stdio/stdin.c
++++ b/libsrc/stdio/stdin.c
+@@ -11,9 +11,11 @@ typedef struct INFILE {
+   unsigned char rwork[256];
+ } INFILE;
+ 
++// stdout/stderr flush at each newline; the buffer bounds one write. 4 KB
++// keeps ordinary lines whole (each write is one console line in a page).
+ typedef struct OUTFILE {
+   FILE file;
+-  unsigned char wwork[128];
++  unsigned char wwork[4096];
+ } OUTFILE;
+ 
+ // Same as _fclose, except calling _remove_opend_file and free.
+diff --git a/libsrc/stdlib/malloc.c b/libsrc/stdlib/malloc.c
+index 898482e..4cbfa35 100644
+--- a/libsrc/stdlib/malloc.c
++++ b/libsrc/stdlib/malloc.c
+@@ -2,72 +2,99 @@
+ #include "stdlib.h"
+ #include "unistd.h"  // for sbrk
+ 
+-// Memory allocator by Kernighan and Ritchie,
+-// The C programming Language, 2nd ed.  Section 8.7.
++// Segregated-fit allocator (replaces the K&R first-fit list, whose malloc and
++// free walk the whole free list: 89% of wcc's time on large translation units).
++//
++// Every block has an 8-byte header holding its size class. Classes 0..255 are
++// 16-byte steps up to 4 KB; larger requests round up to a power of two. Each
++// class keeps a LIFO free list, so malloc and free are O(1). Memory comes from
++// sbrk in 1 MB arenas (or exactly the block size for very large requests).
+ 
+-#define PAGESIZE  (4096)
++#define SMALL_STEP     (16)
++#define SMALL_CLASSES  (256)            // up to 4096 bytes
++#define LARGE_CLASSES  (32)
++#define ARENA_SIZE     (1 << 20)
+ 
+-static Header base = {.s={.ptr=&base, .size=0}};
+-static Header *freep = &base;
++typedef struct FreeBlock { struct FreeBlock *next; } FreeBlock;
+ 
+-void free(void *ap) {
+-  Header *bp, *p;
+-
+-  if (ap == 0)
+-    return;
++static FreeBlock *small_free[SMALL_CLASSES + 1];
++static FreeBlock *large_free[LARGE_CLASSES];
++static char *arena_ptr, *arena_end;
+ 
+-  bp = (Header*)ap - 1;
+-  for (p = freep; !(bp > p && bp < p->s.ptr); p = p->s.ptr)
+-    if (p >= p->s.ptr && (bp > p || bp < p->s.ptr))
+-      break;
+-  if (bp + bp->s.size == p->s.ptr) {
+-    bp->s.size += p->s.ptr->s.size;
+-    bp->s.ptr = p->s.ptr->s.ptr;
+-  } else
+-    bp->s.ptr = p->s.ptr;
+-  if (p + p->s.size == bp) {
+-    p->s.size += bp->s.size;
+-    p->s.ptr = bp->s.ptr;
+-  } else
+-    p->s.ptr = bp;
+-  freep = p;
++static void *take(size_t total) {
++  if ((size_t)(arena_end - arena_ptr) < total) {
++    size_t want = total > ARENA_SIZE ? total : ARENA_SIZE;
++    char *p = sbrk(want);
++    if (p == (char*)-1)
++      return NULL;
++    if (p != arena_end) {  // not contiguous with the old arena: start a new one
++      arena_ptr = p;
++    }
++    arena_end = p + want;
++  }
++  void *p = arena_ptr;
++  arena_ptr += total;
++  return p;
+ }
+ 
+-static Header *morecore(size_t nu) {
+-  size_t size;
+-  char *p;
+-  Header *hp;
++// Header: [class tag (size_t)][user data...]. Tag < 0x10000 is a small class
++// index; otherwise 0x10000 + log2 of the large block size.
++#define HDR  (sizeof(Header))
+ 
+-  size = (nu * sizeof(Header) + (PAGESIZE - 1)) & -PAGESIZE;
+-  p = sbrk(size);
+-  if (p == (char*)-1)
+-    return 0;
+-  hp = (Header*)p;
+-  hp->s.size = size / sizeof(Header);
+-  free((void*)(hp + 1));
+-  return freep;
++static inline unsigned int large_class(size_t n) {
++  unsigned int c = 12;  // 4096
++  while (((size_t)1 << c) < n)
++    ++c;
++  return c;
+ }
+ 
+ void *malloc(size_t nbytes) {
+-  Header *p, *prevp;
+-  size_t nunits;
+-
+-  nunits = (nbytes + sizeof(Header) - 1) / sizeof(Header) + 1;
+-  prevp = freep;
+-  for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {
+-    if (p->s.size >= nunits) {
+-      if (p->s.size == nunits)
+-        prevp->s.ptr = p->s.ptr;
+-      else {
+-        p->s.size -= nunits;
+-        p += p->s.size;
+-        p->s.size = nunits;
+-      }
+-      freep = prevp;
+-      return (void*)(p + 1);
++  if (nbytes == 0)
++    nbytes = 1;
++  if (nbytes <= SMALL_CLASSES * SMALL_STEP) {
++    size_t cls = (nbytes + SMALL_STEP - 1) / SMALL_STEP;
++    FreeBlock *b = small_free[cls];
++    if (b != NULL) {
++      small_free[cls] = b->next;
++      return b;
+     }
+-    if (p == freep)
+-      if ((p = morecore(nunits)) == 0)
+-        return 0;
++    char *p = take(HDR + cls * SMALL_STEP);
++    if (p == NULL)
++      return NULL;
++    ((Header*)p)->s.size = (unsigned int)cls;
++    return p + HDR;
++  }
++  unsigned int lc = large_class(nbytes);
++  if (lc >= LARGE_CLASSES)
++    return NULL;
++  FreeBlock *b = large_free[lc];
++  if (b != NULL) {
++    large_free[lc] = b->next;
++    return b;
+   }
++  char *p = take(HDR + ((size_t)1 << lc));
++  if (p == NULL)
++    return NULL;
++  ((Header*)p)->s.size = 0x10000 + lc;
++  return p + HDR;
++}
++
++void free(void *ap) {
++  if (ap == NULL)
++    return;
++  unsigned int tag = ((Header*)((char*)ap - HDR))->s.size;
++  FreeBlock *b = ap;
++  if (tag < 0x10000) {
++    b->next = small_free[tag];
++    small_free[tag] = b;
++  } else {
++    b->next = large_free[tag - 0x10000];
++    large_free[tag - 0x10000] = b;
++  }
++}
++
++// Usable size of a block, for realloc.
++size_t __malloc_usable_size(void *ap) {
++  unsigned int tag = ((Header*)((char*)ap - HDR))->s.size;
++  return tag < 0x10000 ? (size_t)tag * SMALL_STEP : (size_t)1 << (tag - 0x10000);
+ }
+diff --git a/libsrc/stdlib/realloc.c b/libsrc/stdlib/realloc.c
+index 7d7219c..243523a 100644
+--- a/libsrc/stdlib/realloc.c
++++ b/libsrc/stdlib/realloc.c
+@@ -1,7 +1,8 @@
+-#include "_malloc.h"
+ #include "stdlib.h"
+ #include "string.h"  // memcpy
+ 
++extern size_t __malloc_usable_size(void *ap);
++
+ void *realloc(void *p, size_t size) {
+   if (size <= 0) {
+     free(p);
+@@ -11,11 +12,13 @@ void *realloc(void *p, size_t size) {
+   if (p == NULL)
+     return malloc(size);
+ 
++  size_t s = __malloc_usable_size(p);
++  if (size <= s)
++    return p;  // still fits in this block's size class
++
+   void *buf = malloc(size);
+   if (buf != NULL) {
+-    Header *h = (Header *)p - 1;
+-    size_t s = (h->s.size - 1) * sizeof(Header);
+-    memcpy(buf, p, size > s ? s : size);
++    memcpy(buf, p, s);
+     free(p);
+   }
+   return buf;
+diff --git a/src/cc/frontend/lexer.c b/src/cc/frontend/lexer.c
+index 92ee651..e184fa2 100644
+--- a/src/cc/frontend/lexer.c
++++ b/src/cc/frontend/lexer.c
+@@ -51,6 +51,8 @@ static const struct {
+   {"_Bool", TK_BOOL},
+   {"sizeof", TK_SIZEOF},
+   {"_Alignof", TK_ALIGNOF},
++  {"__alignof__", TK_ALIGNOF},  // GNU spelling (Nim emits it)
++  {"__alignof", TK_ALIGNOF},
+   {"typedef", TK_TYPEDEF},
+   {"__asm", TK_ASM},
+   {"__asm__", TK_ASM},
+diff --git a/src/cc/frontend/parser.c b/src/cc/frontend/parser.c
+index 9721107..131c7a8 100644
+--- a/src/cc/frontend/parser.c
++++ b/src/cc/frontend/parser.c
+@@ -396,8 +396,21 @@ static inline int find_case(Stmt *swtch, Fixnum v) {
+ 
+ static Stmt *parse_case(const Token *tok) {
+   Expr *value = NULL;
+-  if (tok->kind == TK_CASE)
++  Fixnum range_hi = 0;
++  bool range = false;
++  if (tok->kind == TK_CASE) {
+     value = parse_const_fixnum();
++    // GNU extension: `case LO ... HI:` (Nim emits it for character sets).
++    if (match(TK_ELLIPSIS)) {
++      Expr *hi = parse_const_fixnum();
++      range_hi = hi->fixnum;
++      range = true;
++      if (range_hi < value->fixnum || range_hi - value->fixnum > 65535) {
++        parse_error(PE_NOFATAL, tok, "case range too large or empty");
++        range = false;
++      }
++    }
++  }
+   consume(TK_COLON, "`:' expected");
+ 
+   Stmt *swtch = loop_scope.swtch;
+@@ -424,6 +437,30 @@ static Stmt *parse_case(const Token *tok) {
+   if (tok->kind == TK_DEFAULT)
+     swtch->switch_.default_ = stmt;
+ 
++  // A range becomes a chain `case LO: case LO+1: ... case HI: stmt`.
++  if (range) {
++    Stmt *last = stmt;
++    for (Fixnum v = value->fixnum + 1; v <= range_hi; ++v) {
++      if (find_case(swtch, v) >= 0) {
++        parse_error(PE_NOFATAL, tok, "case value `%" PRId64 "' already defined", v);
++        continue;
++      }
++      Expr *e = make_cast(swtch->switch_.value->type, tok,
++                          new_expr_fixlit(&tyInt, tok, v), false);
++      Stmt *c = new_stmt_case(tok, swtch, e);
++      vec_push(swtch->switch_.cases, c);
++      c->parent = last;
++      last->case_.stmt = c;
++      last = c;
++    }
++    Stmt *next = parse_stmt();
++    if (next == NULL)
++      next = new_stmt(ST_EMPTY, tok);
++    next->parent = last;
++    last->case_.stmt = next;
++    return stmt;
++  }
++
+   Stmt *next = parse_stmt();
+   if (next == NULL) {
+     parse_error(PE_NOFATAL, tok, "statement expected");
+diff --git a/src/wcc/emit_wasm.c b/src/wcc/emit_wasm.c
+index 2ff68d9..0b15924 100644
+--- a/src/wcc/emit_wasm.c
++++ b/src/wcc/emit_wasm.c
+@@ -601,6 +601,10 @@ static void emit_linking_symtab_function_sub(
+     // __attribute((import_name("..."))) is specified:
+     flags |= WASM_SYM_EXPLICIT_NAME;
+   }
++  if (finfo->func != NULL && (finfo->flag & FF_EXPORT))
++    flags |= WASM_SYM_EXPORTED | WASM_SYM_NO_STRIP;
++  if (finfo->flag & FF_HIDDEN)
++    flags |= WASM_SYM_VISIBILITY_HIDDEN;
+ 
+   data_push(linking_section, SIK_SYMTAB_FUNCTION);  // kind
+   data_uleb128(linking_section, -1, flags);
+diff --git a/src/wcc/traverse.c b/src/wcc/traverse.c
+index fad418a..c74e8f5 100644
+--- a/src/wcc/traverse.c
++++ b/src/wcc/traverse.c
+@@ -127,6 +127,14 @@ static FuncInfo *register_func_info(const Name *funcname, Function *func, VarInf
+         parse_error(PE_NOFATAL, expr != NULL ? expr->token : NULL, "import_name: string expected");
+       }
+     }
++    // Exported under its own name; a different export_name is not supported.
++    if (table_try_get(attributes, alloc_cname("export_name"), NULL))
++      finfo->flag |= FF_EXPORT;
++    if (table_try_get(attributes, alloc_cname("visibility"), (void**)&params)) {
++      const Expr *expr = params != NULL && params->len > 0 ? params->data[0] : NULL;
++      if (expr != NULL && expr->kind == EX_STR && strcmp(expr->str.buf, "hidden") == 0)
++        finfo->flag |= FF_HIDDEN;
++    }
+   }
+ 
+   if (func != NULL) {
+diff --git a/src/wcc/wasm_linker.c b/src/wcc/wasm_linker.c
+index 965ed64..7f24fd2 100644
+--- a/src/wcc/wasm_linker.c
++++ b/src/wcc/wasm_linker.c
+@@ -1214,8 +1214,30 @@ static inline void verbose_link_result(WasmLinker *linker) {
+   }
+ }
+ 
++// Functions the input objects ask to export: export_name (WASM_SYM_EXPORTED)
++// always; with --export-dynamic also every global, non-hidden function.
++// Archive members (libc) are not scanned, like wasm-ld's --export-dynamic.
++static void collect_object_exports(WasmLinker *linker, Table *exports) {
++  for (int i = 0; i < linker->files->len; ++i) {
++    File *file = linker->files->data[i];
++    if (file->kind != FK_WASMOBJ)
++      continue;
++    Vector *symtab = file->wasmobj->linking.symtab;
++    for (int j = 0; j < symtab->len; ++j) {
++      SymbolInfo *sym = symtab->data[j];
++      if (sym->kind != SIK_SYMTAB_FUNCTION || (sym->flags & WASM_SYM_UNDEFINED) ||
++          (sym->flags & WASM_SYM_BINDING_LOCAL) || sym->name == NULL)
++        continue;
++      if ((sym->flags & WASM_SYM_EXPORTED) ||
++          (linker->options.export_dynamic && !(sym->flags & WASM_SYM_VISIBILITY_HIDDEN)))
++        table_put(exports, sym->name, (void*)sym->name);
++    }
++  }
++}
++
+ bool link_wasm_objs(WasmLinker *linker, Table *exports, uint32_t stack_size) {
+   const Name *name;
++  collect_object_exports(linker, exports);
+   for (int it = 0; (it = table_iterate(exports, it, &name, NULL)) != -1; ) {
+     table_put(&linker->unresolved, name, NULL);
+   }
+diff --git a/src/wcc/wasm_linker.h b/src/wcc/wasm_linker.h
+index 844b9a4..afe9a50 100644
+--- a/src/wcc/wasm_linker.h
++++ b/src/wcc/wasm_linker.h
+@@ -16,6 +16,7 @@ typedef struct {
+   bool allow_undefined;
+   bool export_all;
+   bool export_table;
++  bool export_dynamic;  // export non-hidden functions of the input objects (like wasm-ld)
+ } WasmLinkerOptions;
+ 
+ typedef struct {
+diff --git a/src/wcc/wcc.c b/src/wcc/wcc.c
+index 2efda48..e8ad4c2 100644
+--- a/src/wcc/wcc.c
++++ b/src/wcc/wcc.c
+@@ -253,11 +253,13 @@ static void parse_linker_options(const char *arg, WasmLinkerOptions *lopts) {
+     OPT_ALLOW_UNDEFINED,
+     OPT_EXPORT_ALL,
+     OPT_EXPORT_TABLE,
++    OPT_EXPORT_DYNAMIC,
+   };
+   static const struct option kOptions[] = {
+     {"-allow-undefined", no_argument, OPT_ALLOW_UNDEFINED},
+     {"-export-all", no_argument, OPT_EXPORT_ALL},
+     {"-export-table", no_argument, OPT_EXPORT_TABLE},
++    {"-export-dynamic", no_argument, OPT_EXPORT_DYNAMIC},
+ 
+     {NULL},
+   };
+@@ -277,6 +279,9 @@ static void parse_linker_options(const char *arg, WasmLinkerOptions *lopts) {
+       case OPT_EXPORT_TABLE:
+         lopts->export_table = true;
+         break;
++      case OPT_EXPORT_DYNAMIC:
++        lopts->export_dynamic = true;
++        break;
+       }
+       return;
+     }
+@@ -697,8 +702,8 @@ int main(int argc, char *argv[]) {
+ #if defined(__wasm)
+   const char *root = "/usr";
+ #else
+-  const char *root = dirname(strdup(argv[0]));
+-  if (!is_fullpath(root)) {
++  const char *root = getenv("WCC_ROOT") ? getenv("WCC_ROOT") : dirname(strdup(argv[0]));
++  if (!getenv("WCC_ROOT") && !is_fullpath(root)) {
+     char *cwd = getcwd(NULL, 0);
+     root = JOIN_PATHS(cwd, root);
+   }
+diff --git a/src/wcc/wcc.h b/src/wcc/wcc.h
+index 68e06f4..8640b56 100644
+--- a/src/wcc/wcc.h
++++ b/src/wcc/wcc.h
+@@ -34,6 +34,8 @@ extern Vector *functypes;  // <DataStorage*>
+ #define FF_INDIRECT        (1 << 1)
+ #define FF_STACK_MODIFIED  (1 << 2)
+ #define FF_IMPORT_NAME     (1 << 3)
++#define FF_EXPORT          (1 << 4)  // __attribute__((export_name(...)))
++#define FF_HIDDEN          (1 << 5)  // __attribute__((visibility("hidden")))
+ 
+ typedef struct {
+   Function *func;

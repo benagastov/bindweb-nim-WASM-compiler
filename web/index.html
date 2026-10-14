@@ -73,7 +73,7 @@
     color: var(--text-dim);
   }
 
-  #examples {
+  #examples, #compiler {
     background: var(--bg-inset);
     color: var(--text);
     border: 1px solid var(--border);
@@ -82,7 +82,7 @@
     padding: 6px 10px;
     cursor: pointer;
   }
-  #examples:disabled { color: var(--text-faint); cursor: default; }
+  #examples:disabled, #compiler:disabled { color: var(--text-faint); cursor: default; }
 
   header .spacer { flex: 1; }
 
@@ -739,6 +739,11 @@
     <label class="examples-label" for="examples">Examples</label>
     <select id="examples" disabled>
       <option value="" selected>Load an example…</option>
+    </select>
+    <label class="examples-label" for="compiler">C compiler</label>
+    <select id="compiler" disabled title="Fast (wcc) compiles in seconds and downloads about 1 MB; it switches to clang by itself for anything it cannot build. Compatible (clang) is the original 60 MB toolchain.">
+      <option value="wcc">Fast (wcc)</option>
+      <option value="clang">Compatible (clang)</option>
     </select>
     <span class="spacer"></span>
     <span id="status">Getting ready…</span>

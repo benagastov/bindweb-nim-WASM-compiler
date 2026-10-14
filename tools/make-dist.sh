@@ -43,6 +43,9 @@ fi
 
 # Vendor sanity check: dist is still useful without vendor (the page loads),
 # but compilation will fail, so make the gap loud.
+if [[ ! -f "$DIST/vendor/wcc/cc.wasm" ]]; then
+  say "dist: WARNING: vendor/wcc/ not populated; run './build.sh wcc' first"
+fi
 if [[ ! -f "$DIST/vendor/clang/clang.js" ]]; then
   say "dist: WARNING: vendor/clang/ not populated; run './build.sh clang' first"
 fi

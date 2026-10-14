@@ -145,6 +145,16 @@ export function buildBindwebRuntimeTU(runtimeC, runtimeH) {
   return `/* Nim Bindweb Runtime (ported from legacy IDE index.html, step 1b) */\n#include <string.h>\n${inlined}`;
 }
 
+/**
+ * The clang compile + link. Kept as this exact statement: build drivers
+ * (e.g. QNote's scripts/wasm-build/build-wasm.mjs) instrument
+ * `const link = await clang.compileAndLink(cfiles, ...)` as it is served.
+ */
+async function linkWithClang(clang, cfiles, extraHeaders) {
+  const link = await clang.compileAndLink(cfiles, { extraHeaders });
+  return link;
+}
+
 /* --------------------------------------------------------------------------
  * Public pipeline.
  * ------------------------------------------------------------------------ */
@@ -162,12 +172,15 @@ export function buildBindwebRuntimeTU(runtimeC, runtimeH) {
  *   (default: /project/main.nim; multi-file projects pass
  *   /workspace/<entry> — see nim-compiler.js `workspace` option)
  * @param {import('./nim-compiler.js').NimCompiler} args.nim initialized NimCompiler
- * @param {import('./clang-compiler.js').ClangCompiler} args.clang initialized ClangCompiler
+ * @param {import('./clang-compiler.js').ClangCompiler|import('./wcc-compiler.js').WccCompiler} args.clang
+ *   initialized C compiler: ClangCompiler, or WccCompiler (kind === 'wcc')
+ * @param {() => Promise<import('./clang-compiler.js').ClangCompiler>} [args.fallback]
+ *   with wcc: resolves an initialized ClangCompiler to retry with if wcc fails
  * @param {(msg: string, kind?: string) => void} [args.onLog] log sink
  * @returns {Promise<{ok: boolean, stage: string, wasm: Uint8Array|null,
  *   nimStdout: string, nimStderr: string, clangLog: string, error?: string}>}
  */
-export async function compileToWasm({ source, outFile, nim, clang, onLog = () => {} }) {
+export async function compileToWasm({ source, outFile, nim, clang, fallback = null, onLog = () => {} }) {
   const result = { ok: false, stage: 'nim', wasm: null, nimStdout: '', nimStderr: '', clangLog: '' };
 
   // -- Step 1: Nim -> C --------------------------------------------------
@@ -188,35 +201,53 @@ export async function compileToWasm({ source, outFile, nim, clang, onLog = () =>
   }
   onLog(`nim: ok, ${nimResult.cfiles.length} translation units`, 'ok');
 
-  // -- Step 2: C fixups (SPEC §6) ----------------------------------------
-  onLog('=== step 2: C fixups ===', 'step');
-  const decoder = new TextDecoder();
-  const cfiles = nimResult.cfiles.map(({ name, data }) => ({
-    name,
-    code: buildTU(name, decoder.decode(data), nim.nimbaseHeader),
-  }));
-  cfiles.push({ name: 'raise-stub.c', code: RAISE_STUB_C });
-
   // bindweb C runtime from the bindweb libpack, via the nim module FS
   // (SPEC §6.3; optional so plain Nim programs build without the pack).
-  const extraHeaders = [];
-  const runtimeC = nim.readLibFile('/bindweb/c/bindweb_runtime.c');
-  const runtimeH = nim.readLibFile('/bindweb/c/bindweb_runtime.h');
-  if (runtimeC && runtimeH) {
-    extraHeaders.push({
-      name: 'bindweb_runtime.c',
-      code: buildBindwebRuntimeTU(decoder.decode(runtimeC), decoder.decode(runtimeH)),
-    });
-    onLog('fixups: bindweb_runtime.c inlined from /bindweb/c/', 'info');
-  } else {
-    onLog('fixups: bindweb C runtime not found at /bindweb/c/ — continuing without it', 'warn');
-  }
-  onLog(`fixups: prologue + 2-arg main rewrite applied, raise-stub.c appended (${cfiles.length} TUs)`, 'info');
+  const decoder = new TextDecoder();
+  const runtimeCBytes = nim.readLibFile('/bindweb/c/bindweb_runtime.c');
+  const runtimeHBytes = nim.readLibFile('/bindweb/c/bindweb_runtime.h');
+  const runtimeC = runtimeCBytes && runtimeHBytes ? decoder.decode(runtimeCBytes) : null;
+  const runtimeH = runtimeC ? decoder.decode(runtimeHBytes) : null;
+  if (!runtimeC) onLog('fixups: bindweb C runtime not found at /bindweb/c/ — continuing without it', 'warn');
 
-  // -- Step 3: C -> WASM (clang.wasm + wasm-ld) ---------------------------
-  onLog('=== step 3: C -> WASM (clang.js) ===', 'step');
   result.stage = 'clang';
-  const link = await clang.compileAndLink(cfiles, { extraHeaders });
+  let link = null;
+  if (clang.kind === 'wcc') {
+    // -- Steps 2+3, fast path: wcc (its own prologue, see wcc/wcc-backend.js)
+    onLog('=== step 2: C fixups (wcc) ===', 'step');
+    const { tus, rewrites } = clang.prepare({
+      cfiles: nimResult.cfiles, nimbase: nim.nimbaseHeader, runtimeC, runtimeH,
+    });
+    onLog(`fixups: wcc prologue, ${rewrites} label rewrites, raise-stub.c${runtimeC ? ' + bindweb_runtime.c' : ''} (${tus.length} TUs)`, 'info');
+    onLog('=== step 3: C -> WASM (wcc) ===', 'step');
+    link = await clang.compileAndLink(tus);
+    if (!link.ok && fallback) {
+      // Anything wcc can't handle is still built: fall back to clang.
+      for (const line of link.log.split('\n')) if (line.trim()) onLog(line, 'stderr');
+      onLog('wcc could not build this program — building it with clang instead', 'warn');
+      clang = await fallback();
+      link = null;
+    }
+  }
+  if (!link) {
+    // -- Step 2: C fixups (SPEC §6) --------------------------------------
+    onLog('=== step 2: C fixups ===', 'step');
+    const cfiles = nimResult.cfiles.map(({ name, data }) => ({
+      name,
+      code: buildTU(name, decoder.decode(data), nim.nimbaseHeader),
+    }));
+    cfiles.push({ name: 'raise-stub.c', code: RAISE_STUB_C });
+    const extraHeaders = [];
+    if (runtimeC) {
+      extraHeaders.push({ name: 'bindweb_runtime.c', code: buildBindwebRuntimeTU(runtimeC, runtimeH) });
+      onLog('fixups: bindweb_runtime.c inlined from /bindweb/c/', 'info');
+    }
+    onLog(`fixups: prologue + 2-arg main rewrite applied, raise-stub.c appended (${cfiles.length} TUs)`, 'info');
+
+    // -- Step 3: C -> WASM (clang.wasm + wasm-ld) -------------------------
+    onLog('=== step 3: C -> WASM (clang.js) ===', 'step');
+    link = await linkWithClang(clang, cfiles, extraHeaders);
+  }
   result.clangLog = link.log;
   if (link.log) {
     for (const line of link.log.split('\n')) {
@@ -224,11 +255,11 @@ export async function compileToWasm({ source, outFile, nim, clang, onLog = () =>
     }
   }
   if (!link.ok) {
-    result.error = 'clang compile/link failed';
+    result.error = `${clang.kind === 'wcc' ? 'wcc' : 'clang'} compile/link failed`;
     onLog(result.error, 'error');
     return result;
   }
-  onLog(`clang: linked app.wasm (${link.wasm.length} bytes)`, 'ok');
+  onLog(`${clang.kind === 'wcc' ? 'wcc' : 'clang'}: linked app.wasm (${link.wasm.length} bytes)`, 'ok');
 
   // -- Step 3b: obfuscate (strip Nim fingerprints, keep it runnable) ------
   // Applies to BOTH Run and Build: drops the "name"/"producers" custom
@@ -254,7 +285,9 @@ export async function compileToWasm({ source, outFile, nim, clang, onLog = () =>
  * @param {string} args.source Nim source code
  * @param {string} [args.outFile] MEMFS path of the entry file
  * @param {import('./nim-compiler.js').NimCompiler} args.nim initialized NimCompiler
- * @param {import('./clang-compiler.js').ClangCompiler} args.clang initialized ClangCompiler
+ * @param {import('./clang-compiler.js').ClangCompiler|import('./wcc-compiler.js').WccCompiler} args.clang
+ *   initialized C compiler (see compileToWasm)
+ * @param {() => Promise<import('./clang-compiler.js').ClangCompiler>} [args.fallback] see compileToWasm
  * @param {{createBindwebRunner: (el: HTMLElement) => object}} args.runtime
  *   the bindweb browser runtime (web/src/runtime/bindweb-browser-runtime.js)
  * @param {HTMLElement} [args.outputEl] DOM container the app renders into
@@ -265,7 +298,7 @@ export async function compileToWasm({ source, outFile, nim, clang, onLog = () =>
  * @returns {Promise<{ok: boolean, stage: string, nimStdout: string,
  *   nimStderr: string, clangLog: string, error?: string}>}
  */
-export async function compileAndRun({ source, outFile, nim, clang, runtime, outputEl, onLog = () => {} }) {
+export async function compileAndRun({ source, outFile, nim, clang, fallback = null, runtime, outputEl, onLog = () => {} }) {
   if (!outputEl) {
     if (typeof document === 'undefined' || !document.body) {
       throw new Error('pipeline: outputEl is required outside a DOM (bindweb app mount point)');
@@ -276,7 +309,7 @@ export async function compileAndRun({ source, outFile, nim, clang, runtime, outp
     throw new Error('pipeline: runtime must provide createBindwebRunner(el)');
   }
 
-  const result = await compileToWasm({ source, outFile, nim, clang, onLog });
+  const result = await compileToWasm({ source, outFile, nim, clang, fallback, onLog });
   if (!result.ok) return result;
 
   // -- Step 4: instantiate + run (ported from legacy IDE step 3) ---------

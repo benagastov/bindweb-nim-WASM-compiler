@@ -15,8 +15,12 @@ copy-paste-oriented version of this document is `SKILL.md`.
   mounts at `/workspace`; the *Site* folder is the deployed static webpage
   — Build output. The IDE's app pane renders the Site folder's
   `index.html` through blob: URLs.
-- **Toolchain in wasm**: the Nim compiler and clang/lld run as
-  WebAssembly modules in the page (downloaded once, ~75 MB). **Run**
+- **Toolchain in wasm**: the Nim compiler and a C compiler run as
+  WebAssembly modules in the page. The C compiler is wcc by default (fast,
+  about 1 MB, and it hands off to clang when it can't build a program) or
+  clang/lld (60 MB, loaded on first use). The download is about 12 MB with
+  wcc and about 75 MB with clang. Choose per build with
+  `build({compiler: 'wcc' | 'clang'})`. **Run**
   compiles the open file and executes it in the app pane; **Build**
   (`performBuild()` in `web/src/main.js`) compiles *every* `.nim` file in
   the project into its own self-contained `.wasm` in the Site folder.
@@ -64,7 +68,7 @@ copy-paste-oriented version of this document is `SKILL.md`.
 ## Example session (DevTools console / page.evaluate)
 
 ```js
-await window.NimIDE.ready();                                  // ~75 MB first load
+await window.NimIDE.ready();                                  // ~12 MB first load (wcc)
 await window.NimIDE.writeFile('main.nim', 'echo "hi"\n');     // minimal program
 const r = await window.NimIDE.build();
 r.ok;          // true

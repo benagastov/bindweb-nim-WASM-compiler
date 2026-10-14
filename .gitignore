@@ -7,3 +7,10 @@ toolchain/emsdk/
 toolchain/nim/work/
 .build-env
 backup-*/
+
+# wcc toolchain build tree (toolchain/wcc/tools/fetch-sources.sh, build.sh)
+toolchain/wcc/xcc/
+toolchain/wcc/musl-src/
+toolchain/wcc/libm-musl/
+toolchain/wcc/sysroot/
+toolchain/wcc/host-shims/*.o

@@ -30,6 +30,15 @@ const textDecoder = new TextDecoder();
 /** Map the public area names onto the vfs area constants. */
 const AREAS = { project: AREA_WORKSPACE, site: AREA_SITE };
 
+/** build({compiler}) option: 'wcc' | 'clang', or undefined for the page's choice. */
+function compilerOption(compiler) {
+  if (compiler === undefined || compiler === null) return undefined;
+  if (compiler !== 'wcc' && compiler !== 'clang') {
+    throw new TypeError(`compiler must be 'wcc' or 'clang' (got ${JSON.stringify(compiler)})`);
+  }
+  return compiler;
+}
+
 /**
  * Resolve a public area name ('project' | 'site') to a vfs area constant.
  *
@@ -217,6 +226,9 @@ export function installNimIDE(hooks) {
      * options.entry picks the .nim file the site boots (default main.nim).
      * It does not follow the entry a person picked in the GUI, so scripted
      * builds stay deterministic.
+     *
+     * options.compiler picks the C compiler: 'wcc' (fast; falls back to clang
+     * by itself) or 'clang'. Default: the one selected in the page header.
      */
     async protectJavaScript(source, options = {}) {
       if (typeof source !== 'string') throw new TypeError('source must be JavaScript text');
@@ -231,7 +243,7 @@ export function installNimIDE(hooks) {
       });
       let result;
       try {
-        result = await hooks.runBuild({ javascript, entry: options.entry || 'main.nim' });
+        result = await hooks.runBuild({ javascript, entry: options.entry || 'main.nim', compiler: compilerOption(options.compiler) });
       } finally {
         untap();
       }
@@ -261,7 +273,7 @@ export function installNimIDE(hooks) {
       });
       let result;
       try {
-        result = await hooks.runBuild({ entryOnly: true, javascript, entry: options.entry || 'main.nim' });
+        result = await hooks.runBuild({ entryOnly: true, javascript, entry: options.entry || 'main.nim', compiler: compilerOption(options.compiler) });
       } finally {
         untap();
       }

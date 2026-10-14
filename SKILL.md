@@ -22,7 +22,8 @@ JSON-only API that can do everything the UI can.
   Chrome DevTools console, CDP (`Runtime.evaluate` with
   `awaitPromise: true, returnByValue: true`), or Playwright
   (`page.evaluate`).
-- First load downloads ~75 MB of toolchain (clang + Nim as wasm). Wait
+- First load downloads ~12 MB of toolchain (wcc + Nim as wasm; ~75 MB if the
+  page is set to clang). Wait
   for readiness before building:
 
 ```js
@@ -47,7 +48,7 @@ deployed static webpage folder); it defaults to `'project'` everywhere.
 | `makeDir(path, area?)` | `{path}` | idempotent. |
 | `syncFiles([[path, text], ...])` | `{written, unchanged, deleted}` | mirror a whole source tree into the project in one transaction: unchanged files skipped, files not listed removed. Use it instead of many `writeFile` calls. |
 | `deletePath(path, area?)` | `{deleted}` | folders delete recursively. |
-| `build({entry?}?)` | `{ok, summary, logs, deployed, skipped, siteFiles}` | the Build-button flow; the site boots `entry` (default `main.nim`, independent of the entry picked in the GUI). `buildEntry()` takes the same options and compiles only the entry. |
+| `build({entry?, compiler?}?)` | `{ok, summary, logs, deployed, skipped, siteFiles}` | the Build-button flow; the site boots `entry` (default `main.nim`, independent of the entry picked in the GUI). `compiler` is `'wcc'` (fast; clang is used automatically if wcc fails) or `'clang'`; the default is the page's choice, which is wcc unless changed. `buildEntry()` takes the same options and compiles only the entry. |
 | `exportZip(area?)` | `{name, base64, files, bytes}` | zip as base64 — no download dialog. |
 
 `build()` runs the same pipeline as the Build button: it saves the open
@@ -66,7 +67,7 @@ regenerates `index.html` (with the inlined runtime), and returns:
 ## Copy-paste driving session
 
 ```js
-// 1. Wait for the toolchain (first load: ~75 MB download, then init).
+// 1. Wait for the toolchain (first load: ~12 MB download with wcc, then init).
 if (!(await window.NimIDE.ready())) throw new Error('toolchain failed to load');
 
 // 2. Write the app.
@@ -121,7 +122,7 @@ Runtime.evaluate({
   either the API or the Build button) is refused with
   `ok: false, summary: "a build is already running…"`. The Run/Build
   buttons are disabled for the duration.
-- **First load is ~75 MB** — always `await window.NimIDE.ready()` first;
+- **First load is ~12 MB (wcc) or ~75 MB (clang)** — always `await window.NimIDE.ready()` first;
   it resolves `false` if the toolchain failed to load (bad network).
 - **Build time scales with file count** — every `.nim` in the project is
   compiled into its own wasm, sequentially. Keep helper files you don't

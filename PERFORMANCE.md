@@ -23,6 +23,22 @@ and QNote (78 modules, one 6.6 MB `main.nim.c`).
 The first profile showed serial clang at 89% of build time (117 of
 133 s). Everything below follows from that.
 
+### Then: a faster C compiler (wcc)
+
+The layers below made clang parallel and cached, but clang.wasm itself was
+still slow: LLVM 8, about 1 s per translation unit, and 60 MB to download.
+The IDE now defaults to **wcc**, a small C compiler that writes wasm
+directly (see layer 6). Cold builds through the real IDE, same machine:
+
+| Build | clang | **wcc** |
+|---|---|---|
+| QGraph, whole build (Nim + C + link) | 41.5 s (`-O2`) | **16.6 s** |
+| QGraph, C → wasm only | ~30 s | **4.3 s** (4.1 s compile + 0.2 s link) |
+| 39-TU bindweb DOM app, C → wasm | 1.09 s | **0.29 s** |
+| Compiler download | 60 MB | **0.8 MB** |
+
+Most of a wcc build is now the Nim → C step.
+
 ## The layers (fastest path first)
 
 ### 1. Nim output cache (`web/src/nim-compiler.js`)
@@ -107,6 +123,37 @@ file, so 56 files cost ~2 s. `syncFiles([[path, text], …])` mirrors a whole
 tree in one transaction: unchanged files are skipped, files not listed are
 removed, and the tree re-renders once. That takes ~0.2 s.
 
+### 6. wcc, the fast C compiler (`web/src/wcc-compiler.js`)
+
+[xcc](https://github.com/tyfkda/xcc)'s wcc compiles C straight to a wasm
+object. There is no LLVM IR, no optimizer and no separate linker binary.
+It is built as wasm itself: `cc.wasm` is 0.5 MB. Each worker runs it on an
+in-memory WASI file system (`web/src/wcc/memwasi.js`), with nothing on disk
+and nothing shared between jobs. Objects are cached in IndexedDB
+(`bindweb-wcc-cache`), as with clang.
+
+Two things mattered for speed:
+
+- **The allocator.** xcc's libc shipped a textbook K&R `malloc`: a first-fit
+  list walked on every `malloc` and `free`. On large Nim files it took 89% of
+  compile time. A segregated-fit allocator made `painter.nim.c` (795 KB)
+  24× faster (6.8 s → 0.28 s).
+- **No disk.** Running cc.wasm from Node against a synced folder (OneDrive)
+  cost about 25 ms per file operation. In the browser everything is in
+  memory, so this doesn't apply there.
+
+Correctness: musl's printf core, strtod and libm replace xcc's simplified
+ones. A Nim program covering math, float formatting and parsing, strings,
+collections, JSON and hashing prints the same output as a native build.
+QGraph built with wcc renders the same as the clang build.
+
+The trade-off: wcc doesn't optimize. QGraph frames take about 6 ms instead
+of about 4 ms with a clang `-O2` build. That is fine for development. QNote's
+`build-wasm.mjs` keeps clang `-O2` as its default for deployed builds and
+takes `--compiler wcc` for fast iterations.
+
+If wcc rejects a program, the IDE builds it with clang automatically.
+
 ## Measuring
 
 The QNote build driver (`scripts/wasm-build/build-wasm.mjs`) has profiling
@@ -141,9 +188,13 @@ nim: 95 C files from the Nim output cache (sources unchanged, compile skipped)
 
 ## What remains
 
-- **Nim→C, ~5 s on any source change.** All of it is inside nim.wasm, as a
-  flat profile of compiler functions. Improving it needs a rebuilt or
-  incremental nim.wasm.
+- **Nim→C, ~5 s on any source change (~10 s cold).** With wcc this is now
+  the largest part of a build. All of it is inside nim.wasm, as a flat
+  profile of compiler functions. Improving it needs a rebuilt or incremental
+  nim.wasm.
+- **The largest TU with wcc.** QGraph's `editorui.nim.c` (4.4 MB) takes
+  ~2.7–5.6 s on its own and sets the wall time. Codegen units (layer 3)
+  apply to wcc too; they are not wired up for it yet.
 - **Single huge functions.** Codegen units can't split a function body.
 - **Startup, ~1.2 s.** Page boot plus pool init. A long-lived build daemon
   would remove it.

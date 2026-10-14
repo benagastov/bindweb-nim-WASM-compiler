@@ -3,6 +3,7 @@
 # build.sh — ONE entrypoint: clean clone -> ready-to-serve dist/.
 #
 # WHAT: Orchestrates the whole toolchain:
+#         wcc        install the prebuilt wcc toolchain (default C compiler)
 #         clang      fetch + verify + patch binji's prebuilt clang toolchain
 #         nim-fetch  download the prebuilt nim.wasm toolchain (SHA-256 pinned)
 #         nim        build nim.wasm natively (requires a local emsdk)
@@ -16,7 +17,7 @@
 #       sub-targets so you only rebuild what you changed.
 #
 # HOW:  ./build.sh            # same as: all
-#       ./build.sh all        # clang, nim, libs, dist
+#       ./build.sh all        # wcc, clang, nim, libs, dist
 #       ./build.sh <target>   # run a single target
 # =============================================================================
 set -euo pipefail
@@ -36,6 +37,11 @@ cmd_setup() {
   # Re-source so the current invocation sees the freshly provisioned EMSDK_DIR.
   # shellcheck disable=SC1091
   [[ -f "$HERE/.build-env" ]] && source "$HERE/.build-env"
+}
+
+cmd_wcc() {
+  say "wcc: installing the prebuilt wcc toolchain into $VENDOR_WCC_DIR"
+  bash toolchain/fetch-wcc.sh
 }
 
 cmd_clang() {
@@ -128,6 +134,7 @@ cmd_clean() {
 }
 
 cmd_all() {
+  cmd_wcc
   cmd_clang
   # Fast path: fetch the pinned prebuilt nim.wasm; fall back to a source
   # build only if the download is unavailable (offline, mirror down).
@@ -148,6 +155,7 @@ usage: ./build.sh [target ...] [--force]
 targets (run in the order given):
   all         clang + nim + libs + dist (default)
   setup       prepare a bare machine: base deps + pinned emsdk (native path)
+  wcc         install the prebuilt wcc toolchain (default C compiler, ~1 MB)
   clang       fetch + verify the prebuilt clang toolchain (--force re-downloads)
   nim-fetch   download the prebuilt nim.wasm toolchain (SHA-256 pinned, fast)
   nim         build nim.wasm natively (requires emsdk; EMSDK_DIR must be set)
@@ -178,6 +186,7 @@ main() {
     case "$target" in
       all)        cmd_all ;;
       setup|env)  cmd_setup ;;
+      wcc)        cmd_wcc ;;
       clang)      cmd_clang $force ;;
       nim-fetch)  cmd_nim_fetch ;;
       nim)        cmd_nim ;;

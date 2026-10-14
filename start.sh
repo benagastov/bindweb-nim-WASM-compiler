@@ -116,6 +116,11 @@ else
   ok "Done."
 fi
 
+# The fast C compiler (wcc) ships prebuilt in this repo: just install it.
+bash toolchain/fetch-wcc.sh >/dev/null || fail \
+  "Installing the fast C compiler failed (toolchain/wcc/prebuilt is incomplete)." \
+  "Get a fresh copy of this repository and run this script again."
+
 # =============================================================================
 # Step [2/4]: nim.wasm. Fast path: download the pinned prebuilt toolchain
 # (seconds, SHA-256 verified). Fallback: build from source — prefer Docker

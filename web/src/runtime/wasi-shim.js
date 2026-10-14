@@ -16,6 +16,8 @@
 
 const WASI_ESUCCESS = 0;
 const WASI_EBADF = 8;
+const WASI_ENOENT = 44;
+const WASI_ENOTCAPABLE = 76;
 
 /** Thrown by the shim's proc_exit; exit(0) is normal completion. */
 export class ProcExit extends Error {
@@ -75,6 +77,21 @@ export function createWasiShim(onLog) {
       v.setBigUint64(buf + 16, 0xffffffffffffffffn, true);
       return WASI_ESUCCESS;
     },
+    // wcc's libc (wasi_snapshot_preview1) also stats its stdio streams and
+    // may try paths; there is no file system in a page: stdio is a
+    // character device, every path is missing, nothing can be changed.
+    fd_filestat_get(_fd, buf) {
+      const v = dv();
+      for (let i = 0; i < 64; i += 8) v.setBigUint64(buf + i, 0n, true);
+      v.setUint8(buf + 16, 2); // filetype: character device
+      return WASI_ESUCCESS;
+    },
+    path_open() { return WASI_ENOENT; },
+    path_filestat_get() { return WASI_ENOENT; },
+    path_unlink_file() { return WASI_ENOENT; },
+    path_create_directory() { return WASI_ENOTCAPABLE; },
+    path_remove_directory() { return WASI_ENOENT; },
+    path_rename() { return WASI_ENOENT; },
     fd_prestat_get() { return WASI_EBADF; },
     fd_prestat_dir_name() { return WASI_EBADF; },
     args_sizes_get(a, b) { const v = dv(); v.setUint32(a, 0, true); v.setUint32(b, 0, true); return WASI_ESUCCESS; },

@@ -26,12 +26,13 @@ start.bat           # Windows (needs Docker Desktop)
 ```
 
 The script:
-1. Downloads the prebuilt clang toolchain (npm `clang.js@0.1.1`).
+1. Installs the fast C compiler, wcc (prebuilt in `toolchain/wcc/`), and
+   downloads the prebuilt clang toolchain (npm `clang.js@0.1.1`).
 2. Downloads (or builds from source, as fallback) the prebuilt `nim.wasm`.
 3. Packs `libpacks/` and assembles `dist/`.
 4. Serves `dist/` on http://localhost:8080.
 
-Power-user targets (`./build.sh setup | clang | nim | nim-docker | libs | dist | serve`)
+Power-user targets (`./build.sh setup | wcc | clang | nim | nim-docker | libs | dist | serve`)
 are documented in this repo's `README.md` and the `Makefile`.
 
 ## How to refresh the live demo (`gh-pages`)
@@ -91,6 +92,24 @@ Scripted builds don't use the entry picked in the page:
 `{entry: 'path/to/file.nim'}`. That keeps CLI and agent builds
 deterministic whatever a person last clicked in the GUI.
 
+### The C compiler: Fast (wcc) or Compatible (clang)
+
+Nim compiles to C, and a C compiler turns that into WebAssembly. The
+**C compiler** menu in the header picks it:
+
+- **Fast (wcc)** (the default) is [xcc](https://github.com/tyfkda/xcc)'s wcc,
+  built as WebAssembly with musl's math and float formatting. The download is
+  about 1 MB instead of 60 MB, and it compiles about 7× faster than clang.
+  If wcc can't build a program, the IDE builds it with clang instead, without
+  you doing anything. The output is not optimized, so heavy apps run somewhat
+  slower than an optimized clang build.
+- **Compatible (clang)** is the original toolchain, binji's clang 8. It is
+  downloaded on first use.
+
+The choice is remembered in this browser. Scripted builds pass
+`{compiler: 'wcc' | 'clang'}` (see below). `toolchain/wcc/README.md`
+describes the toolchain.
+
 **Export ZIP** (in both the Project and Site toolbars) downloads the whole
 folder — files and empty folders — from the browser's IndexedDB store as
 `project.zip` / `site.zip`. The archives are written by the
@@ -110,6 +129,7 @@ await NimIDE.ready();
 await NimIDE.writeFile('main.nim', 'echo "hi"\n');
 const r = await NimIDE.build();          // {ok, summary, logs, deployed, …}
 await NimIDE.build({entry: 'examples/rotate.nim'}); // boot another module
+await NimIDE.build({compiler: 'clang'});  // pick the C compiler ('wcc' | 'clang')
 const z = await NimIDE.exportZip('site'); // {name, base64, files, bytes}
 ```
 
@@ -145,16 +165,19 @@ browser.
 
 ## Build performance
 
-Builds are cached and parallel: an unchanged project skips Nim→C, unchanged
-C files come from an object cache, oversized C files are split into codegen
-units, and the rest compile on a pool of clang workers (QGraph: 133 s → 41 s
-cold, 3.5 s rebuild). Details, numbers and profiling switches are in
-**`PERFORMANCE.md`**.
+Builds are cached and parallel. An unchanged project skips Nim→C, and
+unchanged C files come from an object cache. With clang, oversized C files
+are split into codegen units and compiled on a pool of clang workers
+(QGraph: 133 s → 41 s cold, 3.5 s rebuild). With wcc, the default, the C
+step itself is about 7× faster. A cold QGraph build takes 16.6 s in total,
+and its C part 4.3 s instead of about 30 s. Details, numbers and profiling
+switches are in **`PERFORMANCE.md`**.
 
 ## Toolchain notes
 
-Both compilers ship as prebuilt WebAssembly modules, pinned and SHA-256
-verified. Building `nim.wasm` from source is supported as a fallback (Docker
+All compilers ship as prebuilt WebAssembly modules, pinned and SHA-256
+verified. wcc is committed in `toolchain/wcc/prebuilt/` and rebuilds from
+pinned sources (see `toolchain/wcc/README.md`). Building `nim.wasm` from source is supported as a fallback (Docker
 preferred, then a local emsdk) but never required for a first run. See
 `SETUP-zero-env.md` and the `FIXES-*.md` notes for the few C/WASM patches
 the in-browser pipeline needs.

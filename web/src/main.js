@@ -21,6 +21,7 @@
 
 import { NimCompiler } from './nim-compiler.js';
 import { ClangCompiler } from './clang-compiler.js';
+import { WccCompiler } from './wcc-compiler.js';
 import { compileAndRun, compileToWasm } from './pipeline.js';
 import { createBindwebRunner } from './runtime/bindweb-browser-runtime.js';
 import { listLibs, getLibsWithFiles, deleteLib, slugify } from './libstore.js';
@@ -48,20 +49,41 @@ const config = { vendorUrl: './vendor', libpacksUrl: './libpacks' };
  * The big toolchain files, with their known sizes in bytes (measured on the
  * pinned clang.js@0.1.1 npm artifacts + nim.wasm build; used only as the
  * progress-bar denominator — actual bytes are counted as they stream in, so
- * a rebuilt nim.wasm with a different size is fine). Total is about 73 MB.
+ * a rebuilt nim.wasm with a different size is fine). Only the files of the
+ * selected C compiler are fetched: about 12 MB with wcc, 73 MB with clang.
  */
-const VENDOR_FILES = [
-  { path: 'clang/clang.wasm', size: 31214472, label: 'C compiler' },
-  { path: 'clang/lld.wasm', size: 19490094, label: 'linker' },
-  { path: 'clang/sysroot.tar', size: 9297920, label: 'C library' },
-  { path: 'clang/memfs.wasm', size: 345442, label: 'C library helper' },
-  { path: 'clang/clang.js', size: 19214, label: 'C compiler glue' },
+const NIM_VENDOR_FILES = [
   { path: 'nim/nim.wasm', size: 4812366, label: 'Nim compiler' },
   { path: 'nim/nim-bundle.js', size: 6566418, label: 'Nim compiler glue' },
   // NOTE: no nim-bundle.data — this build ships the stdlib/config as libpacks
   // (mounted into MEMFS at run time), and emcc is invoked without --preload-file,
   // so no .data blob is produced. Prefetching it only yielded a harmless 404.
 ];
+const CLANG_VENDOR_FILES = [
+  { path: 'clang/clang.wasm', size: 31214472, label: 'C compiler' },
+  { path: 'clang/lld.wasm', size: 19490094, label: 'linker' },
+  { path: 'clang/sysroot.tar', size: 9297920, label: 'C library' },
+  { path: 'clang/memfs.wasm', size: 345442, label: 'C library helper' },
+  { path: 'clang/clang.js', size: 19214, label: 'C compiler glue' },
+];
+const WCC_VENDOR_FILES = [
+  { path: 'wcc/cc.wasm', size: 484174, label: 'C compiler' },
+  { path: 'wcc/sysroot.tar', size: 348160, label: 'C library' },
+];
+
+/**
+ * C compiler for Run and Build: 'wcc' (fast: compiles in seconds, ~1 MB
+ * download, falls back to clang for anything it can't build) or 'clang'
+ * (binji's clang 8: the original toolchain). Chosen in the header, kept in
+ * localStorage, overridable per build via NimIDE.build({compiler}).
+ */
+const COMPILER_KEY = 'bindweb.compiler';
+const COMPILERS = ['wcc', 'clang'];
+let compilerMode = 'wcc';
+try {
+  const saved = localStorage.getItem(COMPILER_KEY);
+  if (COMPILERS.includes(saved)) compilerMode = saved;
+} catch (e) { /* default */ }
 
 /* --------------------------------------------------------------------------
  * Example programs. Written against the bindweb APIs (see Bindweb/examples
@@ -337,6 +359,15 @@ const statusEl = document.getElementById('status');
 const runBtn = document.getElementById('btn-run');
 const buildBtn = document.getElementById('btn-build');
 const examplesEl = document.getElementById('examples');
+const compilerEl = document.getElementById('compiler');
+compilerEl.value = compilerMode;
+compilerEl.addEventListener('change', () => {
+  compilerMode = compilerEl.value;
+  try { localStorage.setItem(COMPILER_KEY, compilerMode); } catch (e) { /* session only */ }
+  log(`C compiler: ${compilerMode === 'wcc' ? 'Fast (wcc)' : 'Compatible (clang)'}`, 'info');
+  // Warm the chosen toolchain up now rather than at the next Run/Build.
+  compilerFor(compilerMode).catch((e) => log(`C compiler failed to load: ${e.message || e}`, 'error'));
+});
 const progressWrap = document.getElementById('progress-wrap');
 const progressBar = document.getElementById('progress-bar');
 const progressLabel = document.getElementById('progress-label');
@@ -1601,7 +1632,7 @@ function mb(bytes) {
 /**
  * Fetch one vendor file, counting bytes as they stream in.
  *
- * @param {{path: string, size: number, label: string}} file entry from VENDOR_FILES
+ * @param {{path: string, size: number, label: string}} file entry from a *_VENDOR_FILES list
  * @param {(done: number) => void} onBytes called with the cumulative count
  * @returns {Promise<Blob|null>} the file contents, or null if missing
  */
@@ -1634,10 +1665,11 @@ async function prefetchFile(file, onBytes) {
  * nim files as blobs so NimCompiler can load them from blob: URLs instead
  * of fetching them a second time.
  *
+ * @param {Array<{path: string, size: number, label: string}>} files
  * @returns {Promise<Map<string, Blob>>} basename -> blob for nim files
  */
-async function prefetchVendor() {
-  const total = VENDOR_FILES.reduce((acc, f) => acc + f.size, 0);
+async function prefetchVendor(files) {
+  const total = files.reduce((acc, f) => acc + f.size, 0);
   let done = 0;
   progressWrap.classList.add('visible');
   const update = (label) => {
@@ -1649,7 +1681,7 @@ async function prefetchVendor() {
 
   const preloaded = new Map();
   update('starting');
-  for (const file of VENDOR_FILES) {
+  for (const file of files) {
     update(file.label);
     const blob = await prefetchFile(file, (n) => {
       done += n;
@@ -1669,7 +1701,44 @@ async function prefetchVendor() {
  * ------------------------------------------------------------------------ */
 
 let nim = null;
-let clang = null;
+let clangPromise = null;
+let wccPromise = null;
+
+/** The clang toolchain, loaded on first use (Compatible mode, or a wcc fallback). */
+function getClang() {
+  if (!clangPromise) {
+    clangPromise = (async () => {
+      log('clang: loading (first use downloads about 60 MB)', 'info');
+      const c = new ClangCompiler({ vendorUrl: config.vendorUrl, onLog: log });
+      await c.init();
+      return c;
+    })();
+    clangPromise.catch(() => { clangPromise = null; });
+  }
+  return clangPromise;
+}
+
+/** The wcc toolchain (about 1 MB), loaded on first use. */
+function getWcc() {
+  if (!wccPromise) {
+    wccPromise = (async () => {
+      const c = new WccCompiler({ vendorUrl: config.vendorUrl, onLog: log });
+      await c.init();
+      return c;
+    })();
+    wccPromise.catch(() => { wccPromise = null; });
+  }
+  return wccPromise;
+}
+
+/**
+ * The C compiler to build with, plus the fallback for wcc.
+ * @param {string} [mode] 'wcc' | 'clang'; defaults to the header selection
+ */
+async function compilerFor(mode = compilerMode) {
+  if (mode === 'clang') return { clang: await getClang(), fallback: null };
+  return { clang: await getWcc(), fallback: getClang };
+}
 
 /**
  * Resolves true the moment both toolchains finished loading (the same
@@ -1714,9 +1783,12 @@ function friendlyError(result) {
  * the run button when ready.
  */
 async function init() {
-  setStatus('Loading compiler (first visit downloads about 75 MB)…', 'busy');
+  const cFiles = compilerMode === 'clang' ? CLANG_VENDOR_FILES : WCC_VENDOR_FILES;
+  const files = [...cFiles, ...NIM_VENDOR_FILES];
+  const totalMb = Math.round(files.reduce((n, f) => n + f.size, 0) / (1024 * 1024));
+  setStatus(`Loading compiler (first visit downloads about ${totalMb} MB)…`, 'busy');
   try {
-    const preloaded = await prefetchVendor();
+    const preloaded = await prefetchVendor(files);
     setStatus('Starting the compiler…', 'busy');
     nim = new NimCompiler({
       vendorUrl: config.vendorUrl,
@@ -1730,8 +1802,8 @@ async function init() {
       // /workspace on every compile, so multi-file projects just work.
       workspace: () => getFilesWithData(AREA_WORKSPACE),
     });
-    clang = new ClangCompiler({ vendorUrl: config.vendorUrl, onLog: log });
-    await Promise.all([nim.init(), clang.init()]);
+    await Promise.all([nim.init(), compilerFor(compilerMode)]);
+    compilerEl.disabled = false;
     setStatus('Ready — press Run', 'ok');
     log('ready — press Run to build and run your program', 'ok');
     runBtn.disabled = false;
@@ -1743,7 +1815,7 @@ async function init() {
     resolveReady(false);
     showError(
       'The compiler could not be loaded. Check your internet connection and reload the page.',
-      `initialization failed: ${e.message || e}\n\nexpected layout: ./vendor/nim/*, ./vendor/clang/*, ./libpacks/manifest.json next to index.html`
+      `initialization failed: ${e.message || e}\n\nexpected layout: ./vendor/nim/*, ./vendor/wcc/* (or ./vendor/clang/*), ./libpacks/manifest.json next to index.html`
     );
   }
 }
@@ -1774,7 +1846,7 @@ runBtn.addEventListener('click', async () => {
       source: editor.value,
       outFile: `/workspace/${openPath}`,
       nim,
-      clang,
+      ...(await compilerFor()),
       runtime: { createBindwebRunner },
       outputEl,
       onLog: (msg, kind) => {
@@ -1879,6 +1951,9 @@ async function performBuild(options = {}) {
     const dataByPath = new Map(nimFiles.map((f) => [f.path, f.data]));
     const deployed = []; // site-relative wasm paths, entry first
     const skipped = []; // non-entry files that failed to compile
+    const mode = COMPILERS.includes(options.compiler) ? options.compiler : compilerMode;
+    const compiler = await compilerFor(mode);
+    log(`build: C compiler: ${mode === 'wcc' ? 'wcc (fast, clang as fallback)' : 'clang'}`, 'info');
     for (let i = 0; i < queue.length; i++) {
       const path = queue[i];
       log(`build: [${i + 1}/${queue.length}] compiling ${path}`, 'step');
@@ -1886,7 +1961,7 @@ async function performBuild(options = {}) {
         source: path === openPath ? editor.value : textDecoder.decode(dataByPath.get(path)),
         outFile: `/workspace/${path}`,
         nim,
-        clang,
+        ...compiler,
         onLog: (msg, kind) => {
           log(msg, kind);
           if (kind === 'step') narrateStep(msg);
