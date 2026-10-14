@@ -10,13 +10,6 @@ copy-paste-oriented version of this document is `SKILL.md`.
 
 ## Architecture recap
 
-Release binaries now strip names, producers and debug/source-map metadata
-without injecting a fake compiler signature. This is not encryption.
-`await NimIDE.protectWasm(base64)` provides the same pure transformation for an
-existing module and returns `{base64, bytes, protection, encrypted: false}`;
-it does not write project/site files. The historical XOR-encoded generated
-JavaScript payload described below is separate and is not a secrecy boundary.
-
 - **Two virtual folders in IndexedDB** (`web/src/vfs.js`): the *Project*
   folder is the Nim working folder the editor edits and the compiler
   mounts at `/workspace`; the *Site* folder is the deployed static webpage
@@ -29,11 +22,8 @@ JavaScript payload described below is separate and is not a secrecy boundary.
   the project into its own self-contained `.wasm` in the Site folder.
 - **Generated site**: `index.html` + one `.wasm` per module. The whole JS
   runtime (WASI shim, bindweb runtime, loader, boot script) is inlined
-  into `index.html` as ONE obfuscated payload: the minified scripts are
-  concatenated, XOR+base64 encoded, and decoded at page load via
-  `(new Function(decode("…")))()` (`web/src/site-template.js`), so
-  view-source shows gibberish. Only the small config script
-  (`window.__APP_WASM_URL__` + gate globals) stays plaintext.
+  into `index.html` (`web/src/site-template.js`), alongside a small
+  config script (`window.__APP_WASM_URL__` + gate globals).
 - **Domain binding**: a Nim app that calls `bindDomain("example.com")`
   gets its bound hostnames embedded into `index.html`; on any other
   domain the boot aborts before fetching a single byte and renders a fake
@@ -94,5 +84,5 @@ Then, agent-side (Node): `fs.writeFileSync(z.name, Buffer.from(z.base64, 'base64
   (`ok: false`). Await each `build()` before issuing the next.
 - All return values are JSON-safe; use CDP `Runtime.evaluate` with
   `awaitPromise: true, returnByValue: true` and the objects arrive intact.
-- These are client-side checks and conveniences: the obfuscation and
-  domain gate deter casual theft, they are not cryptographic security.
+- The domain gate is a client-side check: it deters casual re-hosting,
+  it is not cryptographic security.

@@ -47,13 +47,13 @@ deployed static webpage folder); it defaults to `'project'` everywhere.
 | `makeDir(path, area?)` | `{path}` | idempotent. |
 | `syncFiles([[path, text], ...])` | `{written, unchanged, deleted}` | mirror a whole source tree into the project in one transaction: unchanged files skipped, files not listed removed. Use it instead of many `writeFile` calls. |
 | `deletePath(path, area?)` | `{deleted}` | folders delete recursively. |
-| `build({entry?, javascript?}?)` | `{ok, summary, logs, deployed, skipped, siteFiles}` | the Build-button flow; the site boots `entry` (default `main.nim`, independent of the entry picked in the GUI). `buildEntry()` takes the same options and compiles only the entry. |
+| `build({entry?}?)` | `{ok, summary, logs, deployed, skipped, siteFiles}` | the Build-button flow; the site boots `entry` (default `main.nim`, independent of the entry picked in the GUI). `buildEntry()` takes the same options and compiles only the entry. |
 | `exportZip(area?)` | `{name, base64, files, bytes}` | zip as base64 — no download dialog. |
 
 `build()` runs the same pipeline as the Build button: it saves the open
 editor file first, compiles every `.nim` in the project (entry `main.nim`
 or the open file), writes one `.wasm` per module into the site folder,
-regenerates `index.html` (obfuscated runtime payload), and returns:
+regenerates `index.html` (with the inlined runtime), and returns:
 
 - `ok` — false when the entry file failed to compile (or nothing to build);
 - `summary` — the one-line result (same as the last console line);
@@ -117,26 +117,6 @@ Runtime.evaluate({
 
 ## Pitfalls
 
-### Release JavaScript options
-
-`await NimIDE.build({javascript: 'obfuscate'})` and
-`await NimIDE.buildEntry({javascript: 'obfuscate'})` default to parser-based
-minification plus randomized local-identifier mangling (vendored Terser 5.47.1).
-Use `'minify'` to retain identifiers, or `'none'` to retain readable JS.
-These options transform generated runtime scripts and runtime files refreshed
-alongside custom HTML; they do not rewrite arbitrary user site scripts.
-`await NimIDE.protectJavaScript(source, {mode: 'obfuscate'})` returns
-`{code, mode, sourceMap: false}` for custom release packagers.
-Global names and properties stay intact by default for cross-file/WASM compatibility.
-For a complete bundle, `protectJavaScript` also accepts `toplevel: true` and
-`reserved: ['publicName']`; this randomizes private top-level function/constant
-bindings too. Bundle dependent scripts together before using that option.
-Serialized worker closures must be compiled independently before page mangling.
-Generated obfuscate-mode HTML also retains its existing reversible payload
-wrapper; QNote packaging uses direct scripts and keeps its no-JS-eval CSP.
-This raises inspection effort, not a confidentiality or injection boundary.
-WASM debug metadata stripping does not hide executable code or embedded data.
-
 - **One build at a time.** A second `build()` while one is in flight (from
   either the API or the Build button) is refused with
   `ok: false, summary: "a build is already running…"`. The Run/Build
@@ -152,6 +132,6 @@ WASM debug metadata stripping does not hide executable code or embedded data.
 - **`readFile` binary heuristic** — files that look binary come back
   base64'd in `.base64` (check the `binary` flag), everything else is
   UTF-8 text in `.text`.
-- The site folder's generated `index.html` carries an obfuscated runtime
-  payload and (when the app uses `bindDomain`) a domain gate — that's
-  normal output, not corruption.
+- The site folder's generated `index.html` carries the inlined runtime
+  and (when the app uses `bindDomain`) a domain gate — that's normal
+  output, not corruption.

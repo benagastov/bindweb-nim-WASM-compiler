@@ -56,8 +56,8 @@ paths (`adios.nim` → `adios.wasm`, `sub/mod.nim` → `sub/mod.wasm`); each
 module statically includes the Nim runtime, wasi-libc and the bindweb C
 runtime. The generated `index.html` boots the **build entry** (see below)
 and carries the whole
-JS runtime (WASI shim, bindweb runtime, loader, boot script) inlined as
-ONE obfuscated payload script — so a generated site is just `index.html`
+JS runtime (WASI shim, bindweb runtime, loader, boot script) inlined into
+it — so a generated site is just `index.html`
 plus one `.wasm` per module, with no `nim-runtime/` folder. If a
 non-entry file fails to compile it is skipped with a warning; if the
 entry fails, the Build fails. Build keeps a hand-edited `index.html` —
@@ -117,29 +117,10 @@ See **`SKILL.md`** (agent skill file with the full API reference and
 copy-paste snippets) and **`AI.md`** (architecture recap + end-to-end
 driving workflow) at the repo root.
 
-## Protecting your app (obfuscation + domain binding)
+## Domain binding
 
-Every wasm the IDE produces — via **Run** or **Build** — is obfuscated on
-the way out (`web/src/wasm-obfuscate.js`): the `name` custom section (what
-makes Chrome DevTools show readable Nim symbols) and the `producers`
-section (which leaks "language: Nim" and the toolchain versions) are
-stripped, and a decoy `.comment` section carrying a classic
-`GCC: (GNU) 12.2.0` signature is injected, so casual analysis tools report
-a GCC-built C binary. Everything that affects execution passes through
-byte-identical — the module runs exactly the same.
-
-The generated site's JavaScript runtime is obfuscated too: the minified
-runtime scripts + boot code are concatenated into one payload, XOR+base64
-encoded, and decoded at page load via `(new Function(decode("…")))()`
-(`web/src/site-template.js`), so view-source and the site file tree show
-only gibberish. The tiny config script (`window.__APP_WASM_URL__` and the
-domain-gate globals) stays plaintext. The wasm import keys
-(`bindweb_js_flush`, `bindweb_wgpu_*`, …) remain visible after decoding —
-they are dictated by the wasm binary's import section.
-
-For domain binding, call `bindDomain("example.com")` (the snake_case
-spelling `bind_domain` works too) early in your Nim program. It adds three
-layers of enforcement:
+Call `bindDomain("example.com")` (the snake_case spelling `bind_domain`
+works too) early in your Nim program. It adds three layers of enforcement:
 
 - **Build-time boot gate** — Build scans your sources for `bindDomain`
   calls and embeds the bound hostnames into the generated `index.html`.
