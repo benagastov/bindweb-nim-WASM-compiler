@@ -134,5 +134,15 @@ await test('imports are only WASI (no stray env imports)', () => {
   assert.deepEqual([...mods], ['wasi_snapshot_preview1']);
 });
 
+await test('a program that only prints needs only the WASI calls wasi-libc builds use', () => {
+  // Existing hosts (QNote loaders, qweb.js, docx-runtime) hand out a fixed
+  // set of functions; reading (fd_read) or stat-ing (fd_filestat_get) must
+  // only be linked by programs that read.
+  const names = WebAssembly.Module.imports(new WebAssembly.Module(wasm)).map((i) => i.name);
+  const allowed = new Set(['args_sizes_get', 'args_get', 'environ_sizes_get', 'environ_get', 'proc_exit',
+    'fd_write', 'fd_close', 'fd_seek', 'fd_fdstat_get', 'fd_prestat_get', 'fd_prestat_dir_name']);
+  assert.deepEqual(names.filter((n) => !allowed.has(n)), []);
+});
+
 if (failures) { console.log(`\n${failures} test(s) failed`); process.exit(1); }
 console.log('\nall wcc tests passed');

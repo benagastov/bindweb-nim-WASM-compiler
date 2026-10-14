@@ -52,7 +52,8 @@ Before running it, the compiler hashes with SHA-256:
 
 On a hit, the C files of the earlier compile are reused and the ~5 s Nim
 step is skipped. Warnings are replayed from the cached stderr. Entries are
-stored in IndexedDB (`bindweb-nim-cache`), newest 8 only.
+stored in IndexedDB (`bindweb-nim-cache`), newest 24 only (enough for a whole
+multi-module release, e.g. the 9 modules of the QOQORO CDN).
 
 To disable it: `localStorage['bindweb.nimCache'] = 'off'`.
 

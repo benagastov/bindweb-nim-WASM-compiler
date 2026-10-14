@@ -128,7 +128,7 @@ const NIM_FLAGS = [
  * disables it.
  * ------------------------------------------------------------------------ */
 
-const NIM_CACHE_MAX = 8;
+const NIM_CACHE_MAX = 24; // a whole multi-module release (e.g. 9 CDN modules) stays cached
 const NIM_CACHE_ROOTS = ['/workspace', '/libs', '/nim', '/bindweb', '/project'];
 const NIM_CACHE_SKIP = new Set(['/project/cache', '/project/out.txt', '/project/err.txt']);
 

@@ -67,7 +67,7 @@ const CLANG_VENDOR_FILES = [
   { path: 'clang/clang.js', size: 19214, label: 'C compiler glue' },
 ];
 const WCC_VENDOR_FILES = [
-  { path: 'wcc/cc.wasm', size: 484174, label: 'C compiler' },
+  { path: 'wcc/cc.wasm', size: 484294, label: 'C compiler' },
   { path: 'wcc/sysroot.tar', size: 348160, label: 'C library' },
 ];
 

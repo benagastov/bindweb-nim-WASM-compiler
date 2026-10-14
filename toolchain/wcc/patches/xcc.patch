@@ -79,23 +79,659 @@ index 0ce9ba0..f2eaf83 100644
  void *memchr(const void *buf, int c, size_t n);
  int memcmp(const void *buf1, const void *buf2, size_t n);
  
+diff --git a/libsrc/_wasm/wasi.h b/libsrc/_wasm/wasi.h
+index 31ad9bf..4ecab97 100644
+--- a/libsrc/_wasm/wasi.h
++++ b/libsrc/_wasm/wasi.h
+@@ -1,131 +1,139 @@
+-#pragma once
+-
+-#include <stddef.h>  // size_t
+-#include <stdint.h>
+-
+-#define WASI_MODULE \
+-    __attribute__((import_module("wasi_snapshot_preview1"), import_name(/* omit */)))
+-
+-// Fdflags
+-#define FDFLAGS_APPEND           (1 << 0)
+-#define FDFLAGS_DSYNC            (1 << 1)
+-#define FDFLAGS_NONBLOCK         (1 << 2)
+-#define FDFLAGS_RSYNC            (1 << 3)
+-#define FDFLAGS_SYNC             (1 << 4)
+-
+-// Lookupflags
+-#define LOOKUPFLAGS_SYMLINK_FOLLOW  (1 << 0)
+-
+-#define OFLAGS_CREAT      (1 << 0)
+-#define OFLAGS_DIRECTORY  (1 << 1)
+-#define OFLAGS_EXCL       (1 << 2)
+-#define OFLAGS_TRUNC      (1 << 3)
+-
+-// Rights
+-#define FD_DATASYNC              (1UL << 0)
+-#define FD_READ                  (1UL << 1)
+-#define FD_SEEK                  (1UL << 2)
+-#define FD_FDSTAT_SET_FLAGS      (1UL << 3)
+-#define FD_SYNC                  (1UL << 4)
+-#define FD_TELL                  (1UL << 5)
+-#define FD_WRITE                 (1UL << 6)
+-#define FD_ADVISE                (1UL << 7)
+-#define FD_ALLOCATE              (1UL << 8)
+-#define PATH_CREATE_DIRECTORY    (1UL << 9)
+-#define PATH_CREATE_FILE         (1UL << 10)
+-#define PATH_LINK_SOURCE         (1UL << 11)
+-#define PATH_LINK_TARGET         (1UL << 12)
+-#define PATH_OPEN                (1UL << 13)
+-#define FD_READDIR               (1UL << 14)
+-#define PATH_READLINK            (1UL << 15)
+-#define PATH_RENAME_SOURCE       (1UL << 16)
+-#define PATH_RENAME_TARGET       (1UL << 17)
+-#define PATH_FILESTAT_GET        (1UL << 18)
+-#define PATH_FILESTAT_SET_SIZE   (1UL << 19)
+-#define PATH_FILESTAT_SET_TIMES  (1UL << 20)
+-#define FD_FILESTAT_GET          (1UL << 21)
+-#define FD_FILESTAT_SET_SIZE     (1UL << 22)
+-#define FD_FILESTAT_SET_TIMES    (1UL << 23)
+-#define PATH_SYMLINK             (1UL << 24)
+-#define PATH_REMOVE_DIRECTORY    (1UL << 25)
+-#define PATH_UNLINK_FILE         (1UL << 26)
+-#define POLL_FD_READWRITE        (1UL << 27)
+-#define SOCK_SHUTDOWN            (1UL << 28)
+-#define SOCK_ACCEPT              (1UL << 29)
+-
+-typedef struct {
+-  const char *str;
+-  size_t n;
+-} Iov;
+-
+-typedef uint8_t Preopentype;
+-
+-typedef struct {
+-  /// The length of the directory name for use with `fd_prestat_dir_name`.
+-  size_t pr_name_len;
+-} PrestatDir;
+-
+-typedef struct {
+-  PrestatDir dir;
+-} PrestatU;
+-
+-typedef struct {
+-  /// The type of the pre-opened capability.
+-  Preopentype pr_type;
+-  /// The contents of the information.
+-  PrestatU u;
+-} Prestat;
+-
+-typedef uint64_t Timestamp;
+-
+-typedef struct Filestat {
+-  uint64_t dev;
+-  uint64_t ino;
+-  uint8_t filetype;
+-  uint64_t nlink;
+-  uint64_t size;
+-  Timestamp atim;
+-  Timestamp mtim;
+-  Timestamp ctim;
+-} Filestat;
+-
+-enum Filetype {
+-  FILETYPE_UNKNOWN,
+-  FILETYPE_BLOCK_DEVICE,
+-  FILETYPE_CHARACTER_DEVICE,
+-  FILETYPE_DIRECTORY,
+-  FILETYPE_REGULAR_FILE,
+-  FILETYPE_SOCKET_DGRAM,
+-  FILETYPE_SOCKET_STREAM,
+-  FILETYPE_SYMBOLIC_LINK,
+-};
+-
+-WASI_MODULE int args_sizes_get(int *pargc, int *plen);
+-WASI_MODULE int args_get(char **pargv, char *pstr);
+-WASI_MODULE _Noreturn void proc_exit(int);
+-
+-WASI_MODULE int fd_prestat_get(int fd, Prestat *prestat);
+-WASI_MODULE int fd_prestat_dir_name(int fd, char *out, size_t size);
+-
+-WASI_MODULE int path_open(
+-    int fd, int dirflags, const char *path, size_t path_len, int oflags, uint64_t fs_rights_base,
+-    uint64_t fs_rights_inherting, uint16_t fdflags, uint32_t *opend_fd);
+-WASI_MODULE int path_unlink_file(int fd, const char *path, size_t path_len);
+-WASI_MODULE int path_rename(int oldfd, const char *oldpath, size_t oldpath_len, int newfd, const char *newpath, size_t newpath_len);
+-WASI_MODULE int path_create_directory(int fd, const char *path, size_t path_len);
+-WASI_MODULE int path_remove_directory(int fd, const char *path, size_t path_len);
+-WASI_MODULE int path_filestat_get(int fd, int flags, const char *path, size_t path_len,
+-                                  Filestat *out);
+-
+-WASI_MODULE int fd_read(int fd, const void *iov, int count, size_t *out);
+-WASI_MODULE int fd_write(int fd, const void *iov, int count, size_t *out);
+-WASI_MODULE int fd_close(int fd);
+-WASI_MODULE int fd_seek(int fd, int64_t offset, int whence, size_t *psize);
+-WASI_MODULE int fd_filestat_get(int fd, Filestat *out);
+-
+-WASI_MODULE int clock_time_get(int clockid, uint64_t precision, uint64_t *out);
+-
+-WASI_MODULE int random_get(void *buf, size_t buf_len);
+-
+-WASI_MODULE int environ_get(char **environ, char *environ_buf);
+-WASI_MODULE int environ_sizes_get(size_t *environ_size, size_t *environ_buf_size);
++#pragma once
++
++#include <stddef.h>  // size_t
++#include <stdint.h>
++
++#define WASI_MODULE \
++    __attribute__((import_module("wasi_snapshot_preview1"), import_name(/* omit */)))
++
++// Fdflags
++#define FDFLAGS_APPEND           (1 << 0)
++#define FDFLAGS_DSYNC            (1 << 1)
++#define FDFLAGS_NONBLOCK         (1 << 2)
++#define FDFLAGS_RSYNC            (1 << 3)
++#define FDFLAGS_SYNC             (1 << 4)
++
++// Lookupflags
++#define LOOKUPFLAGS_SYMLINK_FOLLOW  (1 << 0)
++
++#define OFLAGS_CREAT      (1 << 0)
++#define OFLAGS_DIRECTORY  (1 << 1)
++#define OFLAGS_EXCL       (1 << 2)
++#define OFLAGS_TRUNC      (1 << 3)
++
++// Rights
++#define FD_DATASYNC              (1UL << 0)
++#define FD_READ                  (1UL << 1)
++#define FD_SEEK                  (1UL << 2)
++#define FD_FDSTAT_SET_FLAGS      (1UL << 3)
++#define FD_SYNC                  (1UL << 4)
++#define FD_TELL                  (1UL << 5)
++#define FD_WRITE                 (1UL << 6)
++#define FD_ADVISE                (1UL << 7)
++#define FD_ALLOCATE              (1UL << 8)
++#define PATH_CREATE_DIRECTORY    (1UL << 9)
++#define PATH_CREATE_FILE         (1UL << 10)
++#define PATH_LINK_SOURCE         (1UL << 11)
++#define PATH_LINK_TARGET         (1UL << 12)
++#define PATH_OPEN                (1UL << 13)
++#define FD_READDIR               (1UL << 14)
++#define PATH_READLINK            (1UL << 15)
++#define PATH_RENAME_SOURCE       (1UL << 16)
++#define PATH_RENAME_TARGET       (1UL << 17)
++#define PATH_FILESTAT_GET        (1UL << 18)
++#define PATH_FILESTAT_SET_SIZE   (1UL << 19)
++#define PATH_FILESTAT_SET_TIMES  (1UL << 20)
++#define FD_FILESTAT_GET          (1UL << 21)
++#define FD_FILESTAT_SET_SIZE     (1UL << 22)
++#define FD_FILESTAT_SET_TIMES    (1UL << 23)
++#define PATH_SYMLINK             (1UL << 24)
++#define PATH_REMOVE_DIRECTORY    (1UL << 25)
++#define PATH_UNLINK_FILE         (1UL << 26)
++#define POLL_FD_READWRITE        (1UL << 27)
++#define SOCK_SHUTDOWN            (1UL << 28)
++#define SOCK_ACCEPT              (1UL << 29)
++
++typedef struct {
++  const char *str;
++  size_t n;
++} Iov;
++
++typedef uint8_t Preopentype;
++
++typedef struct {
++  /// The length of the directory name for use with `fd_prestat_dir_name`.
++  size_t pr_name_len;
++} PrestatDir;
++
++typedef struct {
++  PrestatDir dir;
++} PrestatU;
++
++typedef struct {
++  /// The type of the pre-opened capability.
++  Preopentype pr_type;
++  /// The contents of the information.
++  PrestatU u;
++} Prestat;
++
++typedef uint64_t Timestamp;
++
++typedef struct Filestat {
++  uint64_t dev;
++  uint64_t ino;
++  uint8_t filetype;
++  uint64_t nlink;
++  uint64_t size;
++  Timestamp atim;
++  Timestamp mtim;
++  Timestamp ctim;
++} Filestat;
++
++enum Filetype {
++  FILETYPE_UNKNOWN,
++  FILETYPE_BLOCK_DEVICE,
++  FILETYPE_CHARACTER_DEVICE,
++  FILETYPE_DIRECTORY,
++  FILETYPE_REGULAR_FILE,
++  FILETYPE_SOCKET_DGRAM,
++  FILETYPE_SOCKET_STREAM,
++  FILETYPE_SYMBOLIC_LINK,
++};
++
++WASI_MODULE int args_sizes_get(int *pargc, int *plen);
++WASI_MODULE int args_get(char **pargv, char *pstr);
++WASI_MODULE _Noreturn void proc_exit(int);
++
++WASI_MODULE int fd_prestat_get(int fd, Prestat *prestat);
++WASI_MODULE int fd_prestat_dir_name(int fd, char *out, size_t size);
++
++WASI_MODULE int path_open(
++    int fd, int dirflags, const char *path, size_t path_len, int oflags, uint64_t fs_rights_base,
++    uint64_t fs_rights_inherting, uint16_t fdflags, uint32_t *opend_fd);
++WASI_MODULE int path_unlink_file(int fd, const char *path, size_t path_len);
++WASI_MODULE int path_rename(int oldfd, const char *oldpath, size_t oldpath_len, int newfd, const char *newpath, size_t newpath_len);
++WASI_MODULE int path_create_directory(int fd, const char *path, size_t path_len);
++WASI_MODULE int path_remove_directory(int fd, const char *path, size_t path_len);
++WASI_MODULE int path_filestat_get(int fd, int flags, const char *path, size_t path_len,
++                                  Filestat *out);
++
++WASI_MODULE int fd_read(int fd, const void *iov, int count, size_t *out);
++WASI_MODULE int fd_write(int fd, const void *iov, int count, size_t *out);
++WASI_MODULE int fd_close(int fd);
++WASI_MODULE int fd_seek(int fd, int64_t offset, int whence, size_t *psize);
++WASI_MODULE int fd_filestat_get(int fd, Filestat *out);
++
++typedef struct Fdstat {
++  uint8_t filetype;
++  uint16_t flags;
++  uint64_t rights_base;
++  uint64_t rights_inheriting;
++} Fdstat;
++WASI_MODULE int fd_fdstat_get(int fd, Fdstat *out);
++
++WASI_MODULE int clock_time_get(int clockid, uint64_t precision, uint64_t *out);
++
++WASI_MODULE int random_get(void *buf, size_t buf_len);
++
++WASI_MODULE int environ_get(char **environ, char *environ_buf);
++WASI_MODULE int environ_sizes_get(size_t *environ_size, size_t *environ_buf_size);
+diff --git a/libsrc/stdio/_file.c b/libsrc/stdio/_file.c
+index c2a8779..3e48b53 100644
+--- a/libsrc/stdio/_file.c
++++ b/libsrc/stdio/_file.c
+@@ -7,14 +7,23 @@
+ 
+ #include "./_file.h"
+ 
+-// Normal: if actual read size is less than required size, it means EOF.
+-// Pipe:   if subscriber is faster than publisher, it happens. len == 0 means EOF.
+-#define FILE_IS_END(fp, readsize)  (!((fp)->flag & FF_FIFO) || (readsize) == 0)
++#if defined(__wasm)
++#include "../_wasm/wasi.h"
++#endif
+ 
+-static void _finit(FILE *fp) {
++// Stream kind, once per stream: pipes/sockets read short without being at EOF.
++void _finit(FILE *fp) {
+   if ((fp->flag & FF_INITIALIZED))
+     return;
+ 
++#if defined(__wasm)
++  // fd_fdstat_get, not fstat (fd_filestat_get): every wasm host provides it,
++  // so programs that only print need no extra WASI import.
++  Fdstat st;
++  if (fd_fdstat_get(fp->fd, &st) == 0 &&
++      (st.filetype == FILETYPE_SOCKET_STREAM || st.filetype == FILETYPE_SOCKET_DGRAM))
++    fp->flag |= FF_FIFO;
++#else
+   struct stat st;
+   int r = fstat(fp->fd, &st);
+   if (r == 0) {
+@@ -29,58 +38,10 @@ static void _finit(FILE *fp) {
+   } else {
+     // TODO: Retry.
+   }
++#endif
+   fp->flag |= FF_INITIALIZED;
+ }
+ 
+-ssize_t _fread(void *cookie, char *buf, size_t total) {
+-  FILE *fp = cookie;
+-  _finit(fp);
+-  unsigned char *p = (unsigned char*)buf;
+-  if (fp->rs > 0) {
+-    size_t d = fp->rs - fp->rp;
+-    if (total <= d) {
+-      memcpy(p, &fp->rbuf[fp->rp], total);
+-      fp->rp += total;
+-      if (fp->rp >= fp->rs)
+-        fp->rp = fp->rs = 0;
+-      return total;
+-    }
+-    memcpy(p, &fp->rbuf[fp->rp], d);
+-    total -= d;
+-    p += d;
+-  }
+-
+-  if (total < fp->rcapa * 3 / 4) {
+-    // Read more than requested size and store them to the buffer.
+-    ssize_t len = read(fp->fd, fp->rbuf, fp->rcapa);
+-    fp->rs = len;
+-    size_t n = len < 0 || (size_t)len < total ? (size_t)len : total;
+-    fp->rp = n;
+-    if (n > 0) {
+-      memcpy(p, fp->rbuf, n);
+-      p += n;
+-    }
+-    if (len < (ssize_t)fp->rcapa && (ssize_t)n == len) {
+-      if (FILE_IS_END(fp, len))
+-        fp->flag |= FF_EOF;
+-    }
+-  } else {
+-    // Read to the given buffer directly.
+-    ssize_t len = read(fp->fd, p, total);
+-    if (len >= 0) {
+-      p += len;
+-      fp->rp = fp->rs = 0;
+-      if ((size_t)len < total) {
+-        if (FILE_IS_END(fp, len))
+-          fp->flag |= FF_EOF;
+-      }
+-    }
+-  }
+-
+-  // TODO: Align by size.
+-  return (uintptr_t)(p - (unsigned char*)buf);
+-}
+-
+ ssize_t _fwrite(void *cookie, const char *buf, size_t size) {
+   FILE *fp = cookie;
+   _finit(fp);
+diff --git a/libsrc/stdio/_file.h b/libsrc/stdio/_file.h
+index fe2a0d2..10dc46d 100644
+--- a/libsrc/stdio/_file.h
++++ b/libsrc/stdio/_file.h
+@@ -1,53 +1,54 @@
+-#pragma once
+-
+-#include "stddef.h"  // size_t
+-#include "sys/types.h"  // ssize_t, off64_t
+-
+-#define FF_BINARY       (1 << 0)
+-#define FF_READ         (1 << 1)
+-#define FF_WRITE        (1 << 2)
+-#define FF_EOF          (1 << 3)
+-#define FF_GROWMEM      (1 << 4)
+-#define FF_FIFO         (1 << 5)
+-#define FF_INITIALIZED  (1 << 15)
+-
+-typedef ssize_t (*cookie_read_function_t)(void *cookie, char *buf, size_t size);
+-typedef ssize_t (*cookie_write_function_t)(void *cookie, const char *buf, size_t size);
+-typedef int (*cookie_seek_function_t)(void *cookie, off_t *offset, int whence);
+-typedef int (*cookie_close_function_t)(void *cookie);
+-
+-typedef struct {
+-  cookie_read_function_t read;
+-  cookie_write_function_t write;
+-  cookie_seek_function_t seek;
+-  cookie_close_function_t close;
+-} cookie_io_functions_t;
+-
+-struct FILE {
+-  const cookie_io_functions_t *iof;  // not struct but const pointer.
+-  int (*flush)(struct FILE *fp);
+-  unsigned char *wbuf;
+-  unsigned char *rbuf;
+-
+-  int fd;
+-  unsigned int rp, rs, rcapa;
+-  unsigned int wp, wcapa;
+-  unsigned int flag;
+-  int unget_char;
+-};
+-
+-extern ssize_t _fread(void *cookie, char *buf, size_t total);
+-extern ssize_t _fwrite(void *cookie, const char *buf, size_t size);
+-extern int _fseek(void *cookie, off_t *offset, int origin);
+-extern int _fflush(FILE *fp);
+-
+-extern void _add_opened_file(FILE *fp);
+-extern void _remove_opened_file(FILE *fp);
+-extern void _flush_opened_files(void);
+-extern int _detect_open_flag(const char *mode);
+-
+-static inline int _fputc(int c, FILE *fp) {
+-  unsigned char _buf = c;
+-  ssize_t _result = (fp->iof->write)(fp, (char*)&_buf, sizeof(_buf));
+-  return _result == sizeof(_buf) ? (int)_buf : EOF;
+-}
++#pragma once
++
++#include "stddef.h"  // size_t
++#include "sys/types.h"  // ssize_t, off64_t
++
++#define FF_BINARY       (1 << 0)
++#define FF_READ         (1 << 1)
++#define FF_WRITE        (1 << 2)
++#define FF_EOF          (1 << 3)
++#define FF_GROWMEM      (1 << 4)
++#define FF_FIFO         (1 << 5)
++#define FF_INITIALIZED  (1 << 15)
++
++typedef ssize_t (*cookie_read_function_t)(void *cookie, char *buf, size_t size);
++typedef ssize_t (*cookie_write_function_t)(void *cookie, const char *buf, size_t size);
++typedef int (*cookie_seek_function_t)(void *cookie, off_t *offset, int whence);
++typedef int (*cookie_close_function_t)(void *cookie);
++
++typedef struct {
++  cookie_read_function_t read;
++  cookie_write_function_t write;
++  cookie_seek_function_t seek;
++  cookie_close_function_t close;
++} cookie_io_functions_t;
++
++struct FILE {
++  const cookie_io_functions_t *iof;  // not struct but const pointer.
++  int (*flush)(struct FILE *fp);
++  unsigned char *wbuf;
++  unsigned char *rbuf;
++
++  int fd;
++  unsigned int rp, rs, rcapa;
++  unsigned int wp, wcapa;
++  unsigned int flag;
++  int unget_char;
++};
++
++extern void _finit(FILE *fp);
++extern ssize_t _fread(void *cookie, char *buf, size_t total);  // in _fread.c
++extern ssize_t _fwrite(void *cookie, const char *buf, size_t size);
++extern int _fseek(void *cookie, off_t *offset, int origin);
++extern int _fflush(FILE *fp);
++
++extern void _add_opened_file(FILE *fp);
++extern void _remove_opened_file(FILE *fp);
++extern void _flush_opened_files(void);
++extern int _detect_open_flag(const char *mode);
++
++static inline int _fputc(int c, FILE *fp) {
++  unsigned char _buf = c;
++  ssize_t _result = (fp->iof->write)(fp, (char*)&_buf, sizeof(_buf));
++  return _result == sizeof(_buf) ? (int)_buf : EOF;
++}
+diff --git a/libsrc/stdio/_fread.c b/libsrc/stdio/_fread.c
+new file mode 100644
+index 0000000..21844de
+--- /dev/null
++++ b/libsrc/stdio/_fread.c
+@@ -0,0 +1,62 @@
++#include "stdio.h"
++
++#include "string.h"  // memcpy
++#include "unistd.h"  // read
++
++#include "./_file.h"
++
++// Reading lives apart from _file.c: a program that only writes (stdout)
++// then links no read(), i.e. on wasm no fd_read import.
++
++// Normal: if actual read size is less than required size, it means EOF.
++// Pipe:   if subscriber is faster than publisher, it happens. len == 0 means EOF.
++#define FILE_IS_END(fp, readsize)  (!((fp)->flag & FF_FIFO) || (readsize) == 0)
++
++ssize_t _fread(void *cookie, char *buf, size_t total) {
++  FILE *fp = cookie;
++  _finit(fp);
++  unsigned char *p = (unsigned char*)buf;
++  if (fp->rs > 0) {
++    size_t d = fp->rs - fp->rp;
++    if (total <= d) {
++      memcpy(p, &fp->rbuf[fp->rp], total);
++      fp->rp += total;
++      if (fp->rp >= fp->rs)
++        fp->rp = fp->rs = 0;
++      return total;
++    }
++    memcpy(p, &fp->rbuf[fp->rp], d);
++    total -= d;
++    p += d;
++  }
++
++  if (total < fp->rcapa * 3 / 4) {
++    // Read more than requested size and store them to the buffer.
++    ssize_t len = read(fp->fd, fp->rbuf, fp->rcapa);
++    fp->rs = len;
++    size_t n = len < 0 || (size_t)len < total ? (size_t)len : total;
++    fp->rp = n;
++    if (n > 0) {
++      memcpy(p, fp->rbuf, n);
++      p += n;
++    }
++    if (len < (ssize_t)fp->rcapa && (ssize_t)n == len) {
++      if (FILE_IS_END(fp, len))
++        fp->flag |= FF_EOF;
++    }
++  } else {
++    // Read to the given buffer directly.
++    ssize_t len = read(fp->fd, p, total);
++    if (len >= 0) {
++      p += len;
++      fp->rp = fp->rs = 0;
++      if ((size_t)len < total) {
++        if (FILE_IS_END(fp, len))
++          fp->flag |= FF_EOF;
++      }
++    }
++  }
++
++  // TODO: Align by size.
++  return (uintptr_t)(p - (unsigned char*)buf);
++}
 diff --git a/libsrc/stdio/stdin.c b/libsrc/stdio/stdin.c
-index 6690272..1154627 100644
+index 6690272..3914379 100644
 --- a/libsrc/stdio/stdin.c
 +++ b/libsrc/stdio/stdin.c
-@@ -11,9 +11,11 @@ typedef struct INFILE {
+@@ -11,11 +11,6 @@ typedef struct INFILE {
    unsigned char rwork[256];
  } INFILE;
  
+-typedef struct OUTFILE {
+-  FILE file;
+-  unsigned char wwork[128];
+-} OUTFILE;
+-
+ // Same as _fclose, except calling _remove_opend_file and free.
+ static int _fclose_std(void *cookie) {
+   FILE *fp = cookie;
+@@ -35,10 +30,17 @@ static const cookie_io_functions_t kIof = {
+ #define IOF  &kIof
+ 
+ static INFILE  _stdin  = {.file={.iof = IOF, .flush = FFLUSH, .fd = STDIN_FILENO,  .flag = FF_READ, .rbuf = _stdin.rwork, .rcapa = sizeof(_stdin.rwork), .unget_char=EOF}};
++
++#if defined(__riscv)
++// newlib's reent struct holds all three streams, so they stay together here.
++typedef struct OUTFILE {
++  FILE file;
++  unsigned char wwork[128];
++} OUTFILE;
++
+ static OUTFILE _stdout = {.file={.iof = IOF, .flush = FFLUSH, .fd = STDOUT_FILENO, .flag = FF_WRITE, .wbuf = _stdout.wwork, .wcapa = sizeof(_stdout.wwork), .unget_char=EOF}};
+ static OUTFILE _stderr = {.file={.iof = IOF, .flush = FFLUSH, .fd = STDERR_FILENO, .flag = FF_WRITE, .wbuf = _stderr.wwork, .wcapa = sizeof(_stderr.wwork), .unget_char=EOF}};
+ 
+-#if defined(__riscv)
+ static struct _reent _impure_entity = {
+   ._errno = 0,
+   ._stdin = &_stdin.file,
+@@ -47,15 +49,14 @@ static struct _reent _impure_entity = {
+ };
+ struct _reent *_impure_ptr = &_impure_entity;
+ 
+-#else
+-
+-FILE *stdin = &_stdin.file;
+-FILE *stdout = &_stdout.file;
+-FILE *stderr = &_stderr.file;
+-#endif
+-
+ __attribute__((destructor))
+ static void flush_std_files(void) {
+   FFLUSH(stdout);
+   FFLUSH(stderr);
+ }
++
++#else
++// stdout and stderr are in stdout.c: a program that never reads stdin links
++// neither this file nor read() (on wasm: no fd_read import).
++FILE *stdin = &_stdin.file;
++#endif
+diff --git a/libsrc/stdio/stdout.c b/libsrc/stdio/stdout.c
+new file mode 100644
+index 0000000..b0ca3af
+--- /dev/null
++++ b/libsrc/stdio/stdout.c
+@@ -0,0 +1,43 @@
++#if !defined(__riscv)  // riscv keeps all three standard streams in stdin.c
++#include "stdio.h"
++#include "unistd.h"
++
++#include "_file.h"
++#include "_fileman.h"
++
++#define FFLUSH  _fflush
++
 +// stdout/stderr flush at each newline; the buffer bounds one write. 4 KB
 +// keeps ordinary lines whole (each write is one console line in a page).
- typedef struct OUTFILE {
-   FILE file;
--  unsigned char wwork[128];
++typedef struct OUTFILE {
++  FILE file;
 +  unsigned char wwork[4096];
- } OUTFILE;
- 
- // Same as _fclose, except calling _remove_opend_file and free.
++} OUTFILE;
++
++// Same as _fclose, except calling _remove_opend_file and free.
++static int _fclose_std(void *cookie) {
++  FILE *fp = cookie;
++  (*fp->flush)(fp);
++  close(fp->fd);
++  return 0;
++}
++
++// Write-only: no reader, so writing links no read().
++static const cookie_io_functions_t kIofOut = {
++  .write = _fwrite,
++  .seek = _fseek,
++  .close = _fclose_std,
++};
++
++static OUTFILE _stdout = {.file={.iof = &kIofOut, .flush = FFLUSH, .fd = STDOUT_FILENO, .flag = FF_WRITE, .wbuf = _stdout.wwork, .wcapa = sizeof(_stdout.wwork), .unget_char=EOF}};
++static OUTFILE _stderr = {.file={.iof = &kIofOut, .flush = FFLUSH, .fd = STDERR_FILENO, .flag = FF_WRITE, .wbuf = _stderr.wwork, .wcapa = sizeof(_stderr.wwork), .unget_char=EOF}};
++
++FILE *stdout = &_stdout.file;
++FILE *stderr = &_stderr.file;
++
++__attribute__((destructor))
++static void flush_std_files(void) {
++  FFLUSH(stdout);
++  FFLUSH(stderr);
++}
++#endif
 diff --git a/libsrc/stdlib/malloc.c b/libsrc/stdlib/malloc.c
 index 898482e..4cbfa35 100644
 --- a/libsrc/stdlib/malloc.c

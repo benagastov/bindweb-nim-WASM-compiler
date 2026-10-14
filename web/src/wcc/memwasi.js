@@ -212,6 +212,16 @@ export function runWasi(module, { args, fs, cwd = '/work' }) {
       else statInto(ptr, FT.CHAR, 0);
       return E.SUCCESS;
     },
+    fd_fdstat_get(fd, ptr) {
+      const d = fds.get(fd);
+      if (!d) return E.BADF;
+      const v = dv();
+      v.setUint8(ptr, d.kind === 'dir' ? FT.DIR : d.kind === 'file' ? FT.FILE : FT.CHAR);
+      v.setUint16(ptr + 2, 0, true);
+      v.setBigUint64(ptr + 8, 0xffffffffffffffffn, true);
+      v.setBigUint64(ptr + 16, 0xffffffffffffffffn, true);
+      return E.SUCCESS;
+    },
     path_filestat_get(dirfd, flags, pathPtr, pathLen, ptr) {
       const path = resolvePath(dirfd, pathPtr, pathLen);
       if (path === null) return E.BADF;
